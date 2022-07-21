@@ -1,0 +1,33 @@
+(UCTB_converge) E:\root\ChenLiyue\traffic_kesdan\Experiments\XGBoost>python Runner_xgboost.py
+C:\Users\USER\.conda\envs\UCTB_converge\lib\site-packages\numpy\_distributor_init.py:32: UserWarning: loaded more than 1 DLL from .libs:
+C:\Users\USER\.conda\envs\UCTB_converge\lib\site-packages\numpy\.libs\libopenblas.NOIJJG62EMASZI6NYURL6JBKM4EVBGM7.gfortran-win_amd64.dll
+C:\Users\USER\.conda\envs\UCTB_converge\lib\site-packages\numpy\.libs\libopenblas.WCDJNK7YVMPZQ2ME2ZZHJJRJ3JIKNDB7.gfortran-win_amd64.dll
+  stacklevel=1)
+Using TensorFlow backend.
+train_closeness: (21, 253, 24, 1)
+test_y: (144, 253, 1)
+100%|████████████████████████████████████████████████████████████████████████████████| 253/253 [00:06<00:00, 36.78it/s]
+Val RMSE 10.814462
+Test RMSE 11.452285
+C:\Users\USER\.conda\envs\UCTB_converge\lib\site-packages\numpy\_distributor_init.py:32: UserWarning: loaded more than 1 DLL from .libs:
+C:\Users\USER\.conda\envs\UCTB_converge\lib\site-packages\numpy\.libs\libopenblas.NOIJJG62EMASZI6NYURL6JBKM4EVBGM7.gfortran-win_amd64.dll
+C:\Users\USER\.conda\envs\UCTB_converge\lib\site-packages\numpy\.libs\libopenblas.WCDJNK7YVMPZQ2ME2ZZHJJRJ3JIKNDB7.gfortran-win_amd64.dll
+  stacklevel=1)
+Using TensorFlow backend.
+train_closeness: (64, 253, 24, 1)
+test_y: (144, 253, 1)
+100%|████████████████████████████████████████████████████████████████████████████████| 253/253 [00:10<00:00, 24.01it/s]
+Val RMSE 12.292517
+Test RMSE 9.66491
+C:\Users\USER\.conda\envs\UCTB_converge\lib\site-packages\numpy\_distributor_init.py:32: UserWarning: loaded more than 1 DLL from .libs:
+C:\Users\USER\.conda\envs\UCTB_converge\lib\site-packages\numpy\.libs\libopenblas.NOIJJG62EMASZI6NYURL6JBKM4EVBGM7.gfortran-win_amd64.dll
+C:\Users\USER\.conda\envs\UCTB_converge\lib\site-packages\numpy\.libs\libopenblas.WCDJNK7YVMPZQ2ME2ZZHJJRJ3JIKNDB7.gfortran-win_amd64.dll
+  stacklevel=1)
+Using TensorFlow backend.
+train_closeness: (151, 253, 24, 1)
+test_y: (144, 253, 1)
+100%|████████████████████████████████████████████████████████████████████████████████| 253/253 [00:14<00:00, 16.95it/s]
+Val RMSE 11.454096
+Test RMSE 7.9182544
+
+(UCTB_converge) E:\root\ChenLiyue\traffic_kesdan\Experiments\XGBoost>

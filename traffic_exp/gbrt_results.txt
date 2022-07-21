@@ -1,0 +1,46 @@
+
+(UCTB_converge) E:\root\ChenLiyue\traffic_kesdan\Experiments\GBRT>python Runner_gbrt.py
+C:\Users\USER\.conda\envs\UCTB_converge\lib\site-packages\numpy\_distributor_init.py:32: UserWarning: loaded more than 1 DLL from .libs:
+C:\Users\USER\.conda\envs\UCTB_converge\lib\site-packages\numpy\.libs\libopenblas.NOIJJG62EMASZI6NYURL6JBKM4EVBGM7.gfortran-win_amd64.dll
+C:\Users\USER\.conda\envs\UCTB_converge\lib\site-packages\numpy\.libs\libopenblas.WCDJNK7YVMPZQ2ME2ZZHJJRJ3JIKNDB7.gfortran-win_amd64.dll
+  stacklevel=1)
+Using TensorFlow backend.
+CT: 24
+PT: 0
+TT: 0
+train_closeness: (21, 253, 24, 1)
+test_y: (144, 253, 1)
+100%|████████████████████████████████████████████████████████████████████████████████| 253/253 [00:11<00:00, 22.90it/s]
+Val RMSE 13.46524333203017
+Test RMSE 12.284053936638134
+[2022-07-21 14:40:57] INFO (nni/MainThread) Final result: {"default": 13.46524333203017, "test-rmse": 12.284053936638134}
+C:\Users\USER\.conda\envs\UCTB_converge\lib\site-packages\numpy\_distributor_init.py:32: UserWarning: loaded more than 1 DLL from .libs:
+C:\Users\USER\.conda\envs\UCTB_converge\lib\site-packages\numpy\.libs\libopenblas.NOIJJG62EMASZI6NYURL6JBKM4EVBGM7.gfortran-win_amd64.dll
+C:\Users\USER\.conda\envs\UCTB_converge\lib\site-packages\numpy\.libs\libopenblas.WCDJNK7YVMPZQ2ME2ZZHJJRJ3JIKNDB7.gfortran-win_amd64.dll
+  stacklevel=1)
+Using TensorFlow backend.
+CT: 24
+PT: 0
+TT: 0
+train_closeness: (64, 253, 24, 1)
+test_y: (144, 253, 1)
+100%|████████████████████████████████████████████████████████████████████████████████| 253/253 [00:22<00:00, 11.00it/s]
+Val RMSE 14.020286237120192
+Test RMSE 10.352871327969462
+[2022-07-21 14:41:24] INFO (nni/MainThread) Final result: {"default": 14.020286237120192, "test-rmse": 10.352871327969462}
+C:\Users\USER\.conda\envs\UCTB_converge\lib\site-packages\numpy\_distributor_init.py:32: UserWarning: loaded more than 1 DLL from .libs:
+C:\Users\USER\.conda\envs\UCTB_converge\lib\site-packages\numpy\.libs\libopenblas.NOIJJG62EMASZI6NYURL6JBKM4EVBGM7.gfortran-win_amd64.dll
+C:\Users\USER\.conda\envs\UCTB_converge\lib\site-packages\numpy\.libs\libopenblas.WCDJNK7YVMPZQ2ME2ZZHJJRJ3JIKNDB7.gfortran-win_amd64.dll
+  stacklevel=1)
+Using TensorFlow backend.
+CT: 24
+PT: 0
+TT: 0
+train_closeness: (151, 253, 24, 1)
+test_y: (144, 253, 1)
+100%|████████████████████████████████████████████████████████████████████████████████| 253/253 [00:46<00:00,  5.45it/s]
+Val RMSE 11.574098039451824
+Test RMSE 8.351856496893399
+[2022-07-21 14:42:15] INFO (nni/MainThread) Final result: {"default": 11.574098039451824, "test-rmse": 8.351856496893399}
+
+(UCTB_converge) E:\root\ChenLiyue\traffic_kesdan\Experiments\GBRT>

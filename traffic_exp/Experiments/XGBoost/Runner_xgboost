@@ -1,0 +1,16 @@
+import os
+
+
+###############################################
+# BenchMark DiDi
+###############################################
+############# Xian #############
+
+os.system('python XGBoost.py --CT 24 --PT 0 --TT 0 --MergeIndex 12 '
+          '--dataset DiDi --city Xian --DataRange all --TrainDays 2')
+
+os.system('python XGBoost.py --CT 24 --PT 0 --TT 0 --MergeIndex 12 '
+          '--dataset DiDi --city Xian --DataRange all --TrainDays 4')
+
+os.system('python XGBoost.py --CT 24 --PT 0 --TT 0 --MergeIndex 12 '
+          '--dataset DiDi --city Xian --DataRange all --TrainDays 8')
