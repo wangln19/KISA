@@ -1,3 +1,8 @@
+'''
+train lstm model
+record model, embedding and label
+'''
+
 import torch
 import torch.nn as nn
 from torch.nn.utils.rnn import pad_sequence, pack_padded_sequence, pad_packed_sequence
@@ -5,7 +10,7 @@ import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader, Subset
 from torch.utils.tensorboard import SummaryWriter, writer
 
-from sklearn.metrics import roc_auc_score,classification_report
+from sklearn.metrics import roc_auc_score, precision_recall_curve, classification_report
 
 import pandas as pd
 import numpy as np
@@ -14,6 +19,7 @@ import os
 from tqdm import tqdm
 import argparse
 import joblib
+
 
 class EncodedDataset(Dataset):
     def __init__(self, datafile):
@@ -25,6 +31,16 @@ class EncodedDataset(Dataset):
         global input_size
         df = pd.read_csv(datafile, encoding='utf-8', sep=',', engine='python', error_bad_lines=False).drop(
             ['apdid', 'routermac'], axis=1)
+        # Normalization
+        arr = np.array(df['event_amount'])
+        lef = np.mean(arr) - 3 * np.std(arr)
+        rgt = np.mean(arr) + 3 * np.std(arr)
+        lef = min(arr) if min(arr) > lef else lef
+        rgt = max(arr) if max(arr) < rgt else rgt
+        df['event_amount'] = df['event_amount'].apply(lambda x: rgt if x > rgt else x)
+        df['event_amount'] = df['event_amount'].apply(lambda x: lef if x < lef else x)
+        df['event_amount'] = df['event_amount'].apply(lambda x: (x - lef) / (rgt - lef))
+
         df_group = df.groupby(['target_event_id'], sort=False)
         drop_features = ['rn', 'target_event_id', 'label']
         input_size = df.shape[1] - len(drop_features)
@@ -35,6 +51,7 @@ class EncodedDataset(Dataset):
                 self.label.append(frame['label'].iloc[0])
                 frame.sort_values(['rn'], inplace=True, ascending=False)
                 x = frame.drop(drop_features, axis=1).to_numpy()
+
                 self.data.append(x)
                 self.length.append(len(x))
 
@@ -117,8 +134,9 @@ def train(model, train_loader, optimizer, epoch, loss_func_name='cross_entropy',
             train_epoch_size += batch_size
             train_loss += loss.item() * batch_size
 
-            loop.set_postfix(epoch=epoch, loss=train_loss / train_epoch_size, acc=train_accuracy / train_epoch_size)
+    loop.set_postfix(epoch=epoch, loss=train_loss / train_epoch_size, acc=train_accuracy / train_epoch_size)
     writer.add_scalar('loss/train_loss', np.mean(train_loss), epoch)
+
 
 def eval(model, eval_loader, optimizer, epoch, loss_func_name='cross_entropy', desc='Validation', verbose=True, model_name='best_model.pt'):
     validation_accuracy = 0
@@ -153,20 +171,25 @@ def eval(model, eval_loader, optimizer, epoch, loss_func_name='cross_entropy', d
 
     writer.add_scalar('loss/val_loss', np.mean(validation_loss), epoch)
 
-    global best_auc
+    global best_spauc
     #print("label_list:",type(label_list[-1][0]),label_list[-1])
     #print("prob_list:",type(prob_list[-1][0]),prob_list[-1])
     auc = roc_auc_score(label_list, prob_list)
     spauc = roc_auc_score(label_list, prob_list,max_fpr=0.01)
+    precision, recall, thresholds = precision_recall_curve(label_list, prob_list)
+    for _ in range(len(precision)):
+        if precision[_] > 0.9:
+            recall_on_90 = recall[_]
+            break
     if verbose:
-        print(f'Epoch {epoch}, Validation AUC: {auc}, Validation SPAUC: {spauc}')
+        print(f'Epoch {epoch}, Validation AUC: {auc}, Validation SPAUC: {spauc}, recall@0.9: {recall_on_90}')
         print(classification_report(label_list, logit_list, target_names=['0', '1']))
 
-    if auc > best_auc:
-        best_auc = auc
-        state = {'model': model.state_dict(), 'optimizer': optimizer.state_dict(), 'epoch': epoch, "best_auc": best_auc,"best_spauc":spauc}
+    if spauc > best_spauc:
+        best_spauc = spauc
+        state = {'model': model.state_dict(), 'optimizer': optimizer.state_dict(), 'epoch': epoch, "best_spauc": best_spauc, "best_auc":auc}
         torch.save(state, model_name)
-        print("Updating model... spauc is {}, best auc is:{}".format(spauc,best_auc))
+        print("Updating model... auc is {}, best spauc is:{}".format(auc,best_spauc))
         # saving prediction results
         with open(model_name + ".prediction.dict","wb") as fp:
             pickle.dump({"prob_list":prob_list,"logit_list":logit_list},fp)
@@ -175,9 +198,10 @@ def eval(model, eval_loader, optimizer, epoch, loss_func_name='cross_entropy', d
         checkpoint = torch.load(model_name)
         state = {'model': checkpoint["model"], 'optimizer': checkpoint["optimizer"], 'epoch': epoch, "best_auc": checkpoint["best_auc"],"best_spauc":checkpoint["best_spauc"]}
         torch.save(state, model_name)
-        print("Updating epoch... spauc is {}, best auc is:{}".format(checkpoint["best_spauc"],checkpoint["best_auc"]))
-    
-def eval_wo_update(model, loader, epoch, loss_func_name='cross_entropy', desc='Validation', verbose=True, model_name='best_model.pt', save_rep = False):
+        print("Updating epoch... auc is {}, best spauc is:{}".format(checkpoint["best_auc"],checkpoint["best_spauc"]))
+
+
+def eval_wo_update(model, loader, loss_func_name='cross_entropy', desc='Validation', verbose=True, model_name='best_model.pt', save_rep=False):
     validation_accuracy = 0
     validation_epoch_size = 0
     validation_loss = 0
@@ -208,7 +232,7 @@ def eval_wo_update(model, loader, epoch, loss_func_name='cross_entropy', desc='V
                 validation_accuracy += batch_accuracy
                 validation_epoch_size += 1
                 validation_loss += loss.item() * batch_size
-                loop.set_postfix(epoch=epoch, loss=validation_loss / validation_epoch_size,
+                loop.set_postfix(loss=validation_loss / validation_epoch_size,
                                  acc=validation_accuracy / validation_epoch_size)
 
     if save_rep:
@@ -223,9 +247,13 @@ def eval_wo_update(model, loader, epoch, loss_func_name='cross_entropy', desc='V
     #print("prob_list:",type(prob_list[-1][0]),prob_list[-1])
     auc = roc_auc_score(label_list, prob_list)
     spauc = roc_auc_score(label_list, prob_list,max_fpr=0.01)
-    print(f'Epoch {epoch}, Validation AUC: {auc}, Validation SPAUC: {spauc}')
+    precision, recall, thresholds = precision_recall_curve(label_list, prob_list)
+    for _ in range(len(precision)):
+        if precision[_] > 0.9:
+            recall_on_90 = recall[_]
+            break
+    print(f'Validation AUC: {auc}, Validation SPAUC: {spauc}, recall@0.9: {recall_on_90}')
     print(classification_report(label_list, logit_list, target_names=['0', '1']))
-
     
 
 input_size = None
@@ -234,16 +262,16 @@ layer_num = 2
 batch_size = 32
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-best_auc = 0
+best_spauc = 0
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--mode', default='train')  # validate
-    parser.add_argument('--baseroot', default='E:/root/ChenLiyue/ant/sliding_data/LZD/csv')
+    parser.add_argument('--baseroot', default='E:\Transfer_Learning\Data\HK\csv')
     parser.add_argument('--filepath', default='train_2020-01.csv')
     parser.add_argument('--lr', default=0.001,type=float)
     parser.add_argument('--datasets', default='LZD')
-    parser.add_argument('--maxepoch', default=30, type=int)
+    parser.add_argument('--maxepoch', default=50, type=int)
     parser.add_argument('--loss', default='cross_entropy')
     # parser.add_argument('--filepath', default='./data/HK.pkl')
    
@@ -257,7 +285,7 @@ if __name__ == '__main__':
     evalOutputName = args.datasets + "_" + os.path.basename(evalpath).replace(".csv","") + ".pkl"
     testOutputName = args.datasets + "_" + os.path.basename(testpath).replace(".csv","") + ".pkl"
     model_name = args.datasets + "_" + testpath.split("/")[-1].split("_")[-1].replace(".csv","") + "_" + args.mark + ".pt"
-    writer = SummaryWriter(model_name.replace("pt",""))
+    # writer = SummaryWriter(model_name.replace("pt",""))
     print("---------------------------------------------------")
     print("train output name:", trainOutputName)
     print("val output name:", evalOutputName)
@@ -295,7 +323,6 @@ if __name__ == '__main__':
 
 
     input_size = train_dataset[0][0].shape[1]
-    
     writer = SummaryWriter(model_name.replace("pt",""))
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
@@ -311,7 +338,8 @@ if __name__ == '__main__':
         model.load_state_dict(checkpoint['model'])
         optimizer.load_state_dict(checkpoint['optimizer'])
         start = checkpoint['epoch'] + 1
-        best_auc = checkpoint["best_auc"]
+        best_spauc = checkpoint["best_spauc"]
+        print('exist{}! start from {}'.format(model_name, start))
 
     if args.mode == 'train':
         for epoch in range(start, int(args.maxepoch)):
@@ -321,20 +349,20 @@ if __name__ == '__main__':
         checkpoint = torch.load(model_name)
         model.load_state_dict(checkpoint["model"])
         print("evaluating val set...")
-        eval_wo_update(model, eval_loader, start, loss_func_name=args.loss, verbose=True, model_name=model_name)
+        eval_wo_update(model, eval_loader, loss_func_name=args.loss, verbose=True, model_name=model_name)
         print("evaluating test set...")
-        eval_wo_update(model, test_loader, start, loss_func_name=args.loss, verbose=True, model_name=model_name)
+        eval_wo_update(model, test_loader, loss_func_name=args.loss, verbose=True, model_name=model_name)
 
     elif args.mode == 'validate':
         model.load_state_dict(checkpoint["model"])
         print("evaluating val set...")
-        eval_wo_update(model, eval_loader, start, loss_func_name=args.loss, verbose=True, model_name=model_name)
+        eval_wo_update(model, eval_loader, loss_func_name=args.loss, verbose=True, model_name=model_name)
         print("evaluating test set...")
-        eval_wo_update(model, test_loader, start, loss_func_name=args.loss, verbose=True, model_name=model_name)
+        eval_wo_update(model, test_loader, loss_func_name=args.loss, verbose=True, model_name=model_name)
     
     elif args.mode == 'generate':
         model.load_state_dict(checkpoint["model"])
         gen_loader = DataLoader(train_dataset, batch_size=1, shuffle=False, collate_fn=collate_fn)
         print("generating representation...")
-        eval_wo_update(model, gen_loader, start, loss_func_name=args.loss, verbose=True, model_name=model_name, save_rep=True)
+        eval_wo_update(model, gen_loader, loss_func_name=args.loss, verbose=True, model_name=model_name, save_rep=True)
         
