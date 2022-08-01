@@ -1,7 +1,7 @@
-'''
+"""
 train lstm model
 record model, embedding and label
-'''
+"""
 
 import torch
 import torch.nn as nn
@@ -19,6 +19,58 @@ import os
 from tqdm import tqdm
 import argparse
 import joblib
+
+import seaborn as sns
+import matplotlib.pyplot as plt
+
+
+class EarlyStopping:
+    """Early stops the training if validation loss doesn't improve after a given patience."""
+    def __init__(self, patience=7, verbose=False, delta=0, model_name='checkpoints.pt'):
+        """
+        Args:
+            patience (int): How long to wait after last time validation loss improved.
+                            Default: 7
+            verbose (bool): If True, prints a message for each validation loss improvement.
+                            Default: False
+            delta (float): Minimum change in the monitored quantity to qualify as an improvement.
+                            Default: 0
+        """
+        self.patience = patience
+        self.verbose = verbose
+        self.counter = 0
+        self.best_score = None
+        self.early_stop = False
+        self.val_loss_min = np.Inf
+        self.delta = delta
+        self.model_name = model_name
+
+    def __call__(self, val_loss, model, optimizer):
+
+        score = -val_loss
+
+        if self.best_score is None:
+            self.best_score = score
+            self.save_checkpoint(val_loss, model, optimizer)
+        elif score < self.best_score + self.delta:
+            self.counter += 1
+            print(f'EarlyStopping counter: {self.counter} out of {self.patience}')
+            if self.counter >= self.patience:
+                self.early_stop = True
+        else:
+            self.best_score = score
+            self.save_checkpoint(val_loss, model, optimizer)
+            self.counter = 0
+
+    def save_checkpoint(self, val_loss, model, optimizer):
+        '''Saves model when validation loss decrease.'''
+        if self.verbose:
+            print(f'Validation loss decreased ({self.val_loss_min:.6f} --> {val_loss:.6f}).  Saving model ...')
+        state = {'model': model.state_dict(), 'optimizer': optimizer.state_dict(), 'epoch': 0,
+                 "best_auc": 1, "best_spauc": 1, "latest_update_epoch": 0}
+        # save the model with min val loss, so indexes like epoch, beat_auc... is meaningless
+        torch.save(state, self.model_name.replace('.pt', '_selected_by_val_loss.pt'))
+        self.val_loss_min = val_loss
 
 
 class EncodedDataset(Dataset):
@@ -124,7 +176,6 @@ def train(model, train_loader, optimizer, epoch, loss_func_name='cross_entropy',
             model.zero_grad()
             rep, prob = model(inputs, lengths)
             logits = torch.argmax(prob, dim=-1)
-
             loss = loss_func(prob, labels)
             loss.backward()
             optimizer.step()
@@ -171,11 +222,14 @@ def eval(model, eval_loader, optimizer, epoch, loss_func_name='cross_entropy', d
 
     writer.add_scalar('loss/val_loss', np.mean(validation_loss), epoch)
 
-    global best_spauc
+    global best_auc
+    global latest_update_epoch
     #print("label_list:",type(label_list[-1][0]),label_list[-1])
     #print("prob_list:",type(prob_list[-1][0]),prob_list[-1])
     auc = roc_auc_score(label_list, prob_list)
-    spauc = roc_auc_score(label_list, prob_list,max_fpr=0.01)
+    spauc = roc_auc_score(label_list, prob_list, max_fpr=0.01)
+    print(f'Epoch {epoch}, Validation AUC: {auc}, Validation SPAUC: {spauc}')
+    '''more details:
     precision, recall, thresholds = precision_recall_curve(label_list, prob_list)
     for _ in range(len(precision)):
         if precision[_] > 0.9:
@@ -183,22 +237,27 @@ def eval(model, eval_loader, optimizer, epoch, loss_func_name='cross_entropy', d
             break
     if verbose:
         print(f'Epoch {epoch}, Validation AUC: {auc}, Validation SPAUC: {spauc}, recall@0.9: {recall_on_90}')
-        print(classification_report(label_list, logit_list, target_names=['0', '1']))
+        print(classification_report(label_list, logit_list, target_names=['0', '1']))'''
 
-    if spauc > best_spauc:
-        best_spauc = spauc
-        state = {'model': model.state_dict(), 'optimizer': optimizer.state_dict(), 'epoch': epoch, "best_spauc": best_spauc, "best_auc":auc}
+    if auc > best_auc:
+        latest_update_epoch = epoch
+        best_auc = auc
+        state = {'model': model.state_dict(), 'optimizer': optimizer.state_dict(), 'epoch': epoch,
+                 "best_spauc": spauc, "best_auc": auc, "latest_update_epoch": latest_update_epoch}
         torch.save(state, model_name)
-        print("Updating model... auc is {}, best spauc is:{}".format(auc,best_spauc))
+        print("Updating model... best auc is {}, spauc is:{}".format(auc, spauc))
         # saving prediction results
-        with open(model_name + ".prediction.dict","wb") as fp:
-            pickle.dump({"prob_list":prob_list,"logit_list":logit_list},fp)
+        with open(model_name + ".prediction.dict", "wb") as fp:
+            pickle.dump({"prob_list":prob_list, "logit_list": logit_list}, fp)
     else:
         # update epoch
         checkpoint = torch.load(model_name)
-        state = {'model': checkpoint["model"], 'optimizer': checkpoint["optimizer"], 'epoch': epoch, "best_auc": checkpoint["best_auc"],"best_spauc":checkpoint["best_spauc"]}
+        state = {'model': checkpoint["model"], 'optimizer': checkpoint["optimizer"], 'epoch': epoch,
+                 "best_auc": checkpoint["best_auc"], "best_spauc": checkpoint["best_spauc"],
+                 "latest_update_epoch": latest_update_epoch}
         torch.save(state, model_name)
-        print("Updating epoch... auc is {}, best spauc is:{}".format(checkpoint["best_auc"],checkpoint["best_spauc"]))
+        print("Updating epoch... best auc is {}, spauc is:{}".format(checkpoint["best_auc"],checkpoint["best_spauc"]))
+    return validation_loss
 
 
 def eval_wo_update(model, loader, loss_func_name='cross_entropy', desc='Validation', verbose=True, model_name='best_model.pt', save_rep=False):
@@ -248,11 +307,13 @@ def eval_wo_update(model, loader, loss_func_name='cross_entropy', desc='Validati
     auc = roc_auc_score(label_list, prob_list)
     spauc = roc_auc_score(label_list, prob_list,max_fpr=0.01)
     precision, recall, thresholds = precision_recall_curve(label_list, prob_list)
-    for _ in range(len(precision)):
-        if precision[_] > 0.9:
-            recall_on_90 = recall[_]
-            break
-    print(f'Validation AUC: {auc}, Validation SPAUC: {spauc}, recall@0.9: {recall_on_90}')
+    sns.set()
+    plt.plot(recall, precision)
+    plt.xlabel('Recall')
+    plt.ylabel('Precision')
+    plt.show()
+    print(f'min Threshold: {thresholds[0]}, max Threshold: {thresholds[-1]}')
+    print(f'Validation AUC: {auc}, Validation SPAUC: {spauc}')
     print(classification_report(label_list, logit_list, target_names=['0', '1']))
     
 
@@ -262,16 +323,17 @@ layer_num = 2
 batch_size = 32
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-best_spauc = 0
+best_auc = 0
+latest_update_epoch = 0
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--mode', default='train')  # validate
     parser.add_argument('--baseroot', default='E:\Transfer_Learning\Data\HK\csv')
     parser.add_argument('--filepath', default='train_2020-01.csv')
-    parser.add_argument('--lr', default=0.001,type=float)
-    parser.add_argument('--datasets', default='LZD')
-    parser.add_argument('--maxepoch', default=50, type=int)
+    parser.add_argument('--lr', default=0.001, type=float)  # 0.00008 for HK lstm
+    parser.add_argument('--datasets', default='HK')
+    parser.add_argument('--maxepoch', default=100, type=int)  # 200/800 for HK lstm
     parser.add_argument('--loss', default='cross_entropy')
     # parser.add_argument('--filepath', default='./data/HK.pkl')
    
@@ -291,7 +353,7 @@ if __name__ == '__main__':
     print("val output name:", evalOutputName)
     print("test output name:", testOutputName)
     print("model name:", model_name)
-    print("device",device)
+    print("device", device)
     print("---------------------------------------------------")
 
     # loading train set
@@ -321,7 +383,6 @@ if __name__ == '__main__':
         with open(testOutputName, "wb") as fp:
             pickle.dump(test_dataset,fp)
 
-
     input_size = train_dataset[0][0].shape[1]
     writer = SummaryWriter(model_name.replace("pt",""))
 
@@ -330,24 +391,33 @@ if __name__ == '__main__':
     test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False, collate_fn=collate_fn)
 
     model = LSTMClassifier(input_size, hidden_size, layer_num).to(device)
-    optimizer = optim.Adagrad(model.parameters(), lr=float(args.lr), lr_decay=0, weight_decay=0, initial_accumulator_value=0)
+    optimizer = optim.Adagrad(model.parameters(), lr=float(args.lr), lr_decay=0, weight_decay=0,
+                              initial_accumulator_value=0)
     start = 0
+    patience = 20
+    early_stopping = EarlyStopping(patience, verbose=False, model_name=model_name)
 
     if os.path.exists(model_name):
         checkpoint = torch.load(model_name)
         model.load_state_dict(checkpoint['model'])
         optimizer.load_state_dict(checkpoint['optimizer'])
         start = checkpoint['epoch'] + 1
-        best_spauc = checkpoint["best_spauc"]
+        best_auc = checkpoint["best_auc"]
+        latest_update_epoch = checkpoint["latest_update_epoch"]
         print('exist{}! start from {}'.format(model_name, start))
 
     if args.mode == 'train':
         for epoch in range(start, int(args.maxepoch)):
             train(model, train_loader, optimizer, epoch, loss_func_name=args.loss)
-            eval(model, eval_loader, optimizer, epoch, loss_func_name=args.loss, model_name=model_name)
+            val_loss = eval(model, eval_loader, optimizer, epoch, loss_func_name=args.loss, model_name=model_name)
+            early_stopping(val_loss, model, optimizer)
+            if early_stopping.early_stop:
+                print("Early stopping")
+                break
 
         checkpoint = torch.load(model_name)
         model.load_state_dict(checkpoint["model"])
+        print("latest update epoch:", latest_update_epoch)
         print("evaluating val set...")
         eval_wo_update(model, eval_loader, loss_func_name=args.loss, verbose=True, model_name=model_name)
         print("evaluating test set...")
