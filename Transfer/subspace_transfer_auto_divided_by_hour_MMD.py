@@ -1,14 +1,14 @@
 """
 automatically divide feature space into some subspaces by occur time within 24h
-use mean to calculate the distance between subspaces
-learn the matching relationship automatically
+use MMD to calculate the distance between subspaces
+find the matching relationship using the top k tactic
 """
 
 import torch
 import torch.nn as nn
 from torch.nn.utils.rnn import pad_sequence
 import torch.optim as optim
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter, writer
 from sklearn.metrics import roc_auc_score, precision_recall_curve, classification_report
 import pandas as pd
@@ -17,15 +17,14 @@ import pickle
 import os
 from tqdm import tqdm
 import argparse
-import joblib
 import seaborn as sns
 import matplotlib.pyplot as plt
 from sklearn.cluster import KMeans
 import math
 from Earlystopping import EarlyStopping
-from Loss import TransferMeanLoss
+from Loss import TransferMMDLoss
 from Dataset import EncodedDataset
-from Model import LSTMTransfer
+from Model import LSTMClassifier
 
 
 def collate_fn(batch):
@@ -46,7 +45,7 @@ def train(model, train_loader, optimizer, epoch, loss_func=nn.CrossEntropyLoss, 
             model.zero_grad()
             rep, prob = model(inputs, lengths)
             logits = torch.argmax(prob, dim=-1)
-            loss = loss_func(prob, labels, model)
+            loss = loss_func(prob, labels)
             # loss.backward(retain_graph=True)
             loss.backward()
             optimizer.step()
@@ -78,7 +77,7 @@ def eval(model, eval_loader, optimizer, epoch, loss_func=nn.CrossEntropyLoss, de
                 rep, output = model(inputs, lengths)
                 logits = torch.argmax(output, dim=-1)
 
-                loss = loss_func(output, labels, model)
+                loss = loss_func(output, labels)
 
                 label_list.append(labels.cpu().numpy())
                 prob_list.append(torch.softmax(output, dim=-1)[..., 1].cpu().numpy())
@@ -168,27 +167,59 @@ def eval_wo_update(model, loader, desc='Validation'):
     print(classification_report(label_list, logit_list, target_names=['0', '1']))
 
 
-def generate_cluster_label(datasets, datafile, num_of_clusters=6):
+def generate_cluster_label(datasets, datafile):
     with open('./retrieve_time_running_record/{}_time.pkl'.format(datasets), "rb") as fp:
         time = pickle.load(fp)
     df = pd.read_csv(datafile)
     ts = []
     dataset = []
+    SSE = []
+    label_preds = []
     df_group = df.groupby(['target_event_id'], sort=False)
     for target_event_id, frame in df_group:
         if frame['rn'].iloc[0] != 1:
             continue
         ts.append(pd.to_datetime(time[target_event_id]))
     for _ in range(len(ts)):
-        ts[_] = (3600 * ts[_].hour + 60 * ts[_].minute + ts[_].second) * 2 * math.pi / 3600 / 24
+        ts[_] = (3600*ts[_].hour + 60*ts[_].minute + ts[_].second)*2*math.pi/3600/24
         dataset.append([math.cos(ts[_]), math.sin(ts[_])])
-    dataset = np.array(dataset)
-    estimator = KMeans(num_of_clusters)  # 构造聚类器
-    estimator.fit(dataset)  # 聚类
-    label_pred = estimator.labels_  # 获取聚类标签
-    centroids = estimator.cluster_centers_  # 获取聚类中心
-    inertia = estimator.inertia_
-    return label_pred, centroids, inertia
+    for num_of_clusters in range(1, 25):
+        dataset = np.array(dataset)
+        estimator = KMeans(num_of_clusters)  # 构造聚类器
+        estimator.fit(dataset)  # 聚类
+        label_pred = estimator.labels_  # 获取聚类标签
+        centroids = estimator.cluster_centers_  # 获取聚类中心
+        inertia = estimator.inertia_
+        label_preds.append(label_pred)
+        SSE.append(inertia)
+    cmpSSE = []
+    for _ in range(22):
+        cmpSSE.append((SSE[_] - SSE[_ + 1]) / (SSE[_ + 1] - SSE[_ + 2]))
+    for _ in range(22):
+        if cmpSSE[_] < cmpSSE[_ + 1]:
+            num_of_clusters = _ + 2
+            break
+    print("num_of_clusters:", num_of_clusters)
+    return label_preds[num_of_clusters-1]
+
+
+def load_source_domain_representation(src_label_list, src_model_name):
+    """
+    return src_rep
+    """
+    with open(src_model_name.replace(".pt", "_rep.pkl"), "rb") as fp:
+        data = pickle.load(fp)
+        labels = np.array(data["label"])
+        reps = data["rep"]
+    hour_indicator = np.array(src_label_list)
+
+    hour_list = np.unique(hour_indicator)
+    hour_rep_list = []
+    for lab in hour_list:
+        indices = np.where(hour_indicator == lab)[0]
+        hour_rep_list.append(reps[indices])
+
+    return hour_list, hour_rep_list
 
 
 def generate_representation(model, dataset, input_label_list):
@@ -217,33 +248,14 @@ def generate_representation(model, dataset, input_label_list):
     return hour_list, hour_rep_list
 
 
-def load_source_domain_representation(src_label_list, src_model_name):
-    """
-    return src_rep
-    """
-    with open(src_model_name.replace(".pt", "_rep.pkl"), "rb") as fp:
-        data = pickle.load(fp)
-        labels = np.array(data["label"])
-        reps = data["rep"]
-    hour_indicator = np.array(src_label_list)
-
-    hour_list = np.unique(hour_indicator)
-    hour_rep_list = []
-    for lab in hour_list:
-        indices = np.where(hour_indicator == lab)[0]
-        hour_rep_list.append(reps[indices])
-
-    return hour_list, hour_rep_list
-
-
 input_size = None
 hidden_size = 300
 layer_num = 2
 batch_size = 32
-
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 best_auc = 0
 latest_update_epoch = 0
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -251,13 +263,12 @@ if __name__ == '__main__':
     parser.add_argument('--src_root', default='E:\Transfer_Learning\Data\LZD\csv')
     parser.add_argument('--tgt_root', default='E:\Transfer_Learning\Data\HK\csv')
     parser.add_argument('--filepath', default='train_2020-01.csv')
-    parser.add_argument('--lr', default=0.00001, type=float)  # 0.001 for LZD
+    parser.add_argument('--lr', default=0.0001, type=float)  # 0.001 for LZD
     parser.add_argument('--src_datasets', default='LZD')
     parser.add_argument('--tgt_datasets', default='HK')
-    parser.add_argument('--maxepoch', default=20000, type=int)  # 200 for LZD
+    parser.add_argument('--maxepoch', default=100, type=int)  # 200 for LZD
     parser.add_argument('--loss', default='cross_entropy')
-    parser.add_argument('--mark', default="sub_by_hour", type=str)
-    parser.add_argument('--num_of_clusters', default=4, type=int)
+    parser.add_argument('--mark', default="sub_by_hour_MMD", type=str)
     parser.add_argument('--gamma', default=0.001, type=float)
     args = parser.parse_args()
 
@@ -331,7 +342,7 @@ if __name__ == '__main__':
     eval_loader = DataLoader(val_dataset, batch_size=1, shuffle=False, collate_fn=collate_fn)
     test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False, collate_fn=collate_fn)
 
-    model = LSTMTransfer(input_size, hidden_size, layer_num).to(device)
+    model = LSTMClassifier(input_size, hidden_size, layer_num).to(device)
     optimizer = optim.Adagrad(model.parameters(), lr=float(args.lr), lr_decay=0, weight_decay=0,
                               initial_accumulator_value=0)
     start = 0
@@ -357,25 +368,24 @@ if __name__ == '__main__':
         latest_update_epoch = checkpoint["latest_update_epoch"]
         print('exist {}! restart from {}'.format(tgt_model_name, start))
 
-    src_label_list, src_centroids, inertia = generate_cluster_label(args.src_datasets, src_trainpath,
-                                                                    args.num_of_clusters)
+    src_label_list = generate_cluster_label(args.src_datasets, src_trainpath)
     src_hour_list, src_hour_rep_list = load_source_domain_representation(src_label_list, src_model_name)
-    tgt_label_list, tgt_centroids, inertia = generate_cluster_label(args.tgt_datasets, tgt_trainpath,
-                                                                    args.num_of_clusters)
+    tgt_label_list = generate_cluster_label(args.tgt_datasets, tgt_trainpath)
     tgt_hour_list, tgt_hour_rep_list = generate_representation(model, train_dataset, tgt_label_list)
-    loss_func = TransferMeanLoss(gamma=float(args.gamma))
+    loss_func = TransferMMDLoss(gamma=float(args.gamma))
     loss_func.update_src_representation(src_hour_list, src_hour_rep_list)
-    loss_func.update_tgt_representation(model, tgt_hour_list, tgt_hour_rep_list)
+    loss_func.update_tgt_representation(tgt_hour_list, tgt_hour_rep_list)
 
     if args.mode == 'train':
         for epoch in range(start, int(args.maxepoch)):
+            loss_func.calculate_match_loss()
             train(model, train_loader, optimizer, epoch, loss_func=loss_func)
             val_loss = eval(model, eval_loader, optimizer, epoch, loss_func=loss_func, model_name=tgt_model_name)
 
             src_hour_list, src_hour_rep_list = generate_representation(model, src_dataset, src_label_list)
             loss_func.update_src_representation(src_hour_list, src_hour_rep_list)
             tgt_hour_list, tgt_hour_rep_list = generate_representation(model, train_dataset, tgt_label_list)
-            loss_func.update_tgt_representation(model, tgt_hour_list, tgt_hour_rep_list)
+            loss_func.update_tgt_representation(tgt_hour_list, tgt_hour_rep_list)
 
             early_stopping = EarlyStopping(patience, verbose=False, model_name=tgt_model_name)
             early_stopping(val_loss, model, optimizer)
@@ -397,4 +407,3 @@ if __name__ == '__main__':
         eval_wo_update(model, eval_loader)
         print("evaluating test set...")
         eval_wo_update(model, test_loader)
-
