@@ -29,73 +29,6 @@ class FocalLoss(nn.Module):
             return F_loss
 
 
-class TransferMeanLoss(nn.Module):
-    def __init__(self, gamma=0.001):
-        super(TransferMeanLoss, self).__init__()
-        self.gamma = gamma  # trade-off parameters
-        # print("gamma", self.gamma)
-        self.cls = nn.CrossEntropyLoss(weight=torch.Tensor([0.1, 0.8]).to(device))
-
-    def calc_representation_distance(self):
-        distance = torch.zeros((self.src_num_spaces, self.tgt_num_space)).cuda(device)
-        for i in range(self.src_num_spaces):
-            for j in range(i, self.tgt_num_space):
-                distance[i, j] = F.pairwise_distance(self.src_hour_centroid_matrix[i:i + 1],
-                                                     self.tgt_hour_centroid_matrix[j:j + 1], p=2)
-                distance[j, i] = distance[i, j]
-        return distance
-
-    def update_src_representation(self, src_hour_list, src_hour_rep_list):
-        src_hour_centroid_list = []
-        for _ in range(len(src_hour_rep_list)):
-            src_hour_centroid_list.append(src_hour_rep_list[_].mean(axis=0))
-        self.src_num_spaces = len(src_hour_list)
-        self.rep_hidden_states = len(src_hour_centroid_list[0])
-        if isinstance(src_hour_centroid_list[0], torch.Tensor):
-            self.src_hour_centroid_list = [item.reshape((1, -1)) for item in src_hour_centroid_list]
-        else:
-            self.src_hour_centroid_list = [torch.from_numpy(item).cuda(device).reshape((1, -1)) for item in
-                                        src_hour_centroid_list]
-        self.src_hour_centroid_matrix = torch.cat(self.src_hour_centroid_list, axis=0)  # (src_num_spaces, hidden_states)
-        # print("self.src_hour_centroid_matrix:", self.src_hour_centroid_matrix.shape)
-
-    def update_tgt_representation(self, model, tgt_hour_list='default', tgt_hour_rep_list='default'):
-        if tgt_hour_list is not 'default':
-            self.tgt_num_space = len(tgt_hour_list)
-        if tgt_hour_rep_list is not 'default':
-            tgt_hour_centroid_list = []
-            for _ in range(len(tgt_hour_rep_list)):
-                tgt_hour_centroid_list.append(tgt_hour_rep_list[_].mean(axis=0))
-            self.tgt_hour_centroid_matrix = torch.stack(tgt_hour_centroid_list, axis=0)  # (tgt_num_spaces, hidden_states)
-        # print("self.src_hour_centroid_matrix:", self.src_hour_centroid_matrix)
-        # print("self.tgt_hour_centroid_matrix:", self.tgt_hour_centroid_matrix)
-
-        src_after_trans = torch.mm(self.src_hour_centroid_matrix,
-                                   model.src_weight)  # centroid representation in src domain
-        tgt_after_trans = torch.mm(self.tgt_hour_centroid_matrix,
-                                   model.tgt_weight)  # centroid representation in tgt domain
-
-        # src_after_trans = model.src_weight(self.src_hour_centroid_matrix)
-        # tgt_after_trans = model.tgt_weight(self.tgt_hour_centroid_matrix)
-
-        dot_product = torch.mm(src_after_trans, tgt_after_trans.T) / np.sqrt(self.rep_hidden_states)
-        alpha = F.softmax(dot_product, dim=0)
-        distance = self.calc_representation_distance()
-
-        # print("alpha:", alpha)
-        # print("alpha:", alpha.device)
-        # print("distance:", distance.device)
-
-        match_loss = torch.mul(alpha, distance).sum().sum()
-        # print("match_loss:", match_loss)
-        self.match_loss = match_loss
-
-    def forward(self, prob, labels, model):
-        cls_loss = self.cls(prob, labels)
-        self.update_tgt_representation(model)
-        return cls_loss + self.gamma * self.match_loss
-
-
 def Guassian_Kernel(source, target, kernel_mul=2.0, kernel_num=5, fix_sigma=None):
     '''
     将源域数据和目标域数据转化为核矩阵，即上文中的K
@@ -142,7 +75,7 @@ def MMD_Loss(source, target, kernel_mul=2.0, kernel_num=5, fix_sigma=None):
     Return:
         loss: MMD loss
     '''
-    source, target = torch.Tensor(source), target.cpu()
+    source, target = torch.Tensor(source), torch.Tensor(target)
     source, target = Variable(source), Variable(target)
     batch_size = int(source.size()[0])  # 一般默认为源域和目标域的batchsize相同
     kernels = Guassian_Kernel(source, target, kernel_mul=kernel_mul, kernel_num=kernel_num, fix_sigma=fix_sigma)
@@ -171,41 +104,70 @@ class TransferMMDLoss(nn.Module):
         self.tgt_num_space = len(tgt_hour_list)
         self.tgt_hour_rep_list = tgt_hour_rep_list
 
-    def select_src_representation(self, num):
-        slt_src_rep_list = []
-        for _ in range(self.src_num_space):
-            count = 0
-            if isinstance(self.src_hour_rep_list[_], torch.Tensor):
-                self.src_hour_rep_list[_] = self.src_hour_rep_list[_].cpu().numpy()
-            while True:
-                indices = random.sample(range(self.src_hour_rep_list[_].shape[0]), num)
-                selected_centroid = self.src_hour_rep_list[_][indices].mean(axis=0)
-                ori_centriod = self.src_hour_rep_list[_].mean(axis=0)
-                dist = F.pairwise_distance(torch.from_numpy(ori_centriod.reshape(1,self.rep_hidden_states)),
-                                           torch.from_numpy(selected_centroid.reshape(1,self.rep_hidden_states)), p=2)
-                dist = float(dist)
-                # set select bar = 0.1
-                if dist < 0.1:
-                    break
-                else:
-                    count += 1
-                    if count > 50:
-                        raise RuntimeError("Select Centroid Bar is too Strict.")
-            slt_src_rep_list.append(self.src_hour_rep_list[_][indices])
-        return slt_src_rep_list
+    def select_src_representation(self, num, index):
+        count = 0
+        src_hour_rep = self.src_hour_rep_list[index]
+        if isinstance(src_hour_rep, torch.Tensor):
+            src_hour_rep = src_hour_rep.cpu().numpy()
+        while True:
+            indices = random.sample(range(src_hour_rep.shape[0]), num)
+            slt_src_hour_rep = src_hour_rep[indices]
+            selected_centroid = slt_src_hour_rep.mean(axis=0)
+            ori_centroid = src_hour_rep.mean(axis=0)
+            dist = F.pairwise_distance(torch.from_numpy(ori_centroid.reshape(1, self.rep_hidden_states)),
+                                       torch.from_numpy(selected_centroid.reshape(1, self.rep_hidden_states)), p=2)
+            dist = float(dist)
+            # set select bar = 0.1
+            if dist < 0.1 or num < 30:
+                break
+            else:
+                count += 1
+                if count > 50:
+                    raise RuntimeError("Select Centroid Bar is too Strict.")
+        return slt_src_hour_rep
+
+    def select_tgt_representation(self, num, index):
+        count = 0
+        tgt_hour_rep = self.tgt_hour_rep_list[index]
+        if isinstance(tgt_hour_rep, torch.Tensor):
+            tgt_hour_rep = tgt_hour_rep.cpu().numpy()
+        while True:
+            indices = random.sample(range(tgt_hour_rep.shape[0]), num)
+            slt_tgt_hour_rep = tgt_hour_rep[indices]
+            selected_centroid = slt_tgt_hour_rep.mean(axis=0)
+            ori_centroid = tgt_hour_rep.mean(axis=0)
+            dist = F.pairwise_distance(torch.from_numpy(ori_centroid.reshape(1, self.rep_hidden_states)),
+                                       torch.from_numpy(selected_centroid.reshape(1, self.rep_hidden_states)), p=2)
+            dist = float(dist)
+            # set select bar = 0.1
+            if dist < 0.1 or num < 30:
+                break
+            else:
+                count += 1
+                if count > 50:
+                    raise RuntimeError("Select Centroid Bar is too Strict.")
+        return slt_tgt_hour_rep
 
     def calc_representation_distance(self):
         dists = []
         for _ in range(self.tgt_num_space):
             dist = []
-            slt_src_rep_list = self.select_src_representation(len(self.tgt_hour_rep_list[_]))
             for __ in range(self.src_num_space):
-                dist.append(MMD_Loss(slt_src_rep_list[__], self.tgt_hour_rep_list[_]))
+                if len(self.tgt_hour_rep_list[_]) <= len(self.src_hour_rep_list[__]):
+                    slt_src_rep = self.select_src_representation(len(self.tgt_hour_rep_list[_]), __)
+                    if isinstance(self.tgt_hour_rep_list[_], torch.Tensor):
+                        self.tgt_hour_rep_list[_] = self.tgt_hour_rep_list[_].cpu().numpy()
+                    dist.append(MMD_Loss(slt_src_rep, self.tgt_hour_rep_list[_]))
+                else:
+                    slt_tgt_rep = self.select_tgt_representation(len(self.src_hour_rep_list[__]), _)
+                    if isinstance(self.src_hour_rep_list[__], torch.Tensor):
+                        self.src_hour_rep_list[__] = self.src_hour_rep_list[__].cpu().numpy()
+                    dist.append(MMD_Loss(self.src_hour_rep_list[__], slt_tgt_rep))
             dists.append(dist)
         distance = np.array(dists)  # (self.tgt_num_space, self.src_num_spaces)
         return distance
 
-    def match_representation(self, top_k=1):
+    def match_representation(self, top_k):
         dist_matrix = self.calc_representation_distance()
         numerator_matrix = np.zeros((self.tgt_num_space, self.src_num_space))
         denominator_matrix = np.ones((self.tgt_num_space, self.src_num_space))
@@ -218,8 +180,65 @@ class TransferMMDLoss(nn.Module):
                     denominator_matrix[_, __] = 0
         return dist_matrix, numerator_matrix, denominator_matrix
 
-    def calculate_match_loss(self):
-        dist_matrix, numerator_matrix, denominator_matrix = self.match_representation(top_k=1)
+    def calculate_match_loss(self, top_k=1):
+        dist_matrix, numerator_matrix, denominator_matrix = self.match_representation(top_k)
+        numerator = torch.mul(torch.from_numpy(dist_matrix), torch.from_numpy(numerator_matrix)).sum().sum()
+        denominator = torch.mul(torch.from_numpy(dist_matrix), torch.from_numpy(denominator_matrix)).sum().sum()
+        match_loss = numerator / denominator
+        self.match_loss = match_loss
+
+    def forward(self, prob, labels):
+        cls_loss = self.cls(prob, labels)
+        return cls_loss + self.gamma * self.match_loss
+
+
+class TransferMeanLoss(nn.Module):
+    def __init__(self, gamma=0.001):
+        super(TransferMeanLoss, self).__init__()
+        self.gamma = gamma  # trade-off parameters
+        # print("gamma", self.gamma)
+        self.cls = nn.CrossEntropyLoss(weight=torch.Tensor([0.1, 0.8]).to(device))
+
+    def update_src_representation(self, src_hour_list, src_hour_rep_list):
+        self.src_num_space = len(src_hour_list)
+        self.rep_hidden_states = src_hour_rep_list[0].shape[1]
+        self.src_hour_rep_list = src_hour_rep_list
+
+    def update_tgt_representation(self, tgt_hour_list, tgt_hour_rep_list):
+        self.tgt_num_space = len(tgt_hour_list)
+        self.tgt_hour_rep_list = tgt_hour_rep_list
+
+    def calc_representation_distance(self):
+        dists = []
+        for _ in range(self.tgt_num_space):
+            dist = []
+            for __ in range(self.src_num_space):
+                if isinstance(self.src_hour_rep_list[__], np.ndarray):
+                    src_hour_rep_centroid = torch.from_numpy(self.src_hour_rep_list[__].mean(axis=0)).cuda().reshape(1, self.rep_hidden_states)
+                else:
+                    src_hour_rep_centroid = self.src_hour_rep_list[__].mean(axis=0).reshape(1, self.rep_hidden_states)
+                tgt_hour_rep_centroid = self.tgt_hour_rep_list[_].mean(axis=0).reshape(1, self.rep_hidden_states)
+                dis = F.pairwise_distance(src_hour_rep_centroid, tgt_hour_rep_centroid, p=2)
+                dist.append(float(dis))
+            dists.append(dist)
+        distance = np.array(dists)  # (self.tgt_num_space, self.src_num_spaces)
+        return distance
+
+    def match_representation(self, top_k):
+        dist_matrix = self.calc_representation_distance()
+        numerator_matrix = np.zeros((self.tgt_num_space, self.src_num_space))
+        denominator_matrix = np.ones((self.tgt_num_space, self.src_num_space))
+        for _ in range(self.tgt_num_space):
+            tgt_list = list(dist_matrix[_])
+            tgt_list.sort()
+            for __ in range(self.src_num_space):
+                if dist_matrix[_, __] in tgt_list[:top_k]:
+                    numerator_matrix[_, __] = 1
+                    denominator_matrix[_, __] = 0
+        return dist_matrix, numerator_matrix, denominator_matrix
+
+    def calculate_match_loss(self, top_k=1):
+        dist_matrix, numerator_matrix, denominator_matrix = self.match_representation(top_k)
         numerator = torch.mul(torch.from_numpy(dist_matrix), torch.from_numpy(numerator_matrix)).sum().sum()
         denominator = torch.mul(torch.from_numpy(dist_matrix), torch.from_numpy(denominator_matrix)).sum().sum()
         match_loss = numerator / denominator

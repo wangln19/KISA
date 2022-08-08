@@ -1,6 +1,6 @@
 """
-automatically divide feature space into some subspaces by occur time within 24h
-use MMD to calculate the distance between subspaces
+automatically divide feature space into some subspaces by event amount
+use Mean to calculate the distance between subspaces
 find the matching relationship using the top k tactic
 """
 
@@ -22,7 +22,7 @@ import matplotlib.pyplot as plt
 from sklearn.cluster import KMeans
 import math
 from Earlystopping import EarlyStopping
-from Loss import TransferMMDLoss
+from Loss import TransferMeanLoss
 from Dataset import EncodedDataset
 from Model import LSTMClassifier
 
@@ -171,7 +171,6 @@ def generate_cluster_label(datasets, datafile):
     with open('./retrieve_time_running_record/{}_time.pkl'.format(datasets), "rb") as fp:
         time = pickle.load(fp)
     df = pd.read_csv(datafile)
-    ts = []
     dataset = []
     SSE = []
     label_preds = []
@@ -179,11 +178,8 @@ def generate_cluster_label(datasets, datafile):
     for target_event_id, frame in df_group:
         if frame['rn'].iloc[0] != 1:
             continue
-        ts.append(pd.to_datetime(time[target_event_id]))
-    for _ in range(len(ts)):
-        ts[_] = (3600*ts[_].hour + 60*ts[_].minute + ts[_].second)*2*math.pi/3600/24
-        dataset.append([math.cos(ts[_]), math.sin(ts[_])])
-    for num_of_clusters in range(1, 25):
+        dataset.append([frame.iloc[-1].at['event_amount']])
+    for num_of_clusters in range(1, 15):
         dataset = np.array(dataset)
         estimator = KMeans(num_of_clusters)  # 构造聚类器
         estimator.fit(dataset)  # 聚类
@@ -193,9 +189,9 @@ def generate_cluster_label(datasets, datafile):
         label_preds.append(label_pred)
         SSE.append(inertia)
     cmpSSE = []
-    for _ in range(22):
+    for _ in range(12):
         cmpSSE.append((SSE[_] - SSE[_ + 1]) / (SSE[_ + 1] - SSE[_ + 2]))
-    for _ in range(22):
+    for _ in range(12):
         if cmpSSE[_] < cmpSSE[_ + 1]:
             num_of_clusters = _ + 2
             break
@@ -269,7 +265,7 @@ if __name__ == '__main__':
     parser.add_argument('--tgt_datasets', default='HK')
     parser.add_argument('--maxepoch', default=1000, type=int)  # 200 for LZD
     parser.add_argument('--loss', default='cross_entropy')
-    parser.add_argument('--mark', default="sub_by_hour_MMD", type=str)
+    parser.add_argument('--mark', default="sub_by_amount", type=str)
     parser.add_argument('--gamma', default=0.001, type=float)
     args = parser.parse_args()
 
@@ -360,6 +356,7 @@ if __name__ == '__main__':
     else:
         raise FileNotFoundError("initial source model not found.")
 
+    # tgt_model_name = 'HK_2020-01_sub_by_amount_selected_by_val_loss.pt'
     if os.path.exists(tgt_model_name):
         checkpoint = torch.load(tgt_model_name)
         model.load_state_dict(checkpoint['model'])
@@ -373,7 +370,7 @@ if __name__ == '__main__':
     src_hour_list, src_hour_rep_list = load_source_domain_representation(src_label_list, src_model_name)
     tgt_label_list = generate_cluster_label(args.tgt_datasets, tgt_trainpath)
     tgt_hour_list, tgt_hour_rep_list = generate_representation(model, train_dataset, tgt_label_list)
-    loss_func = TransferMMDLoss(gamma=float(args.gamma))
+    loss_func = TransferMeanLoss(gamma=float(args.gamma))
     loss_func.update_src_representation(src_hour_list, src_hour_rep_list)
     loss_func.update_tgt_representation(tgt_hour_list, tgt_hour_rep_list)
 

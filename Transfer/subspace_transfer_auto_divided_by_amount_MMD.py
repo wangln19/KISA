@@ -171,7 +171,6 @@ def generate_cluster_label(datasets, datafile):
     with open('./retrieve_time_running_record/{}_time.pkl'.format(datasets), "rb") as fp:
         time = pickle.load(fp)
     df = pd.read_csv(datafile)
-    ts = []
     dataset = []
     SSE = []
     label_preds = []
@@ -179,11 +178,8 @@ def generate_cluster_label(datasets, datafile):
     for target_event_id, frame in df_group:
         if frame['rn'].iloc[0] != 1:
             continue
-        ts.append(pd.to_datetime(time[target_event_id]))
-    for _ in range(len(ts)):
-        ts[_] = (3600*ts[_].hour + 60*ts[_].minute + ts[_].second)*2*math.pi/3600/24
-        dataset.append([math.cos(ts[_]), math.sin(ts[_])])
-    for num_of_clusters in range(1, 25):
+        dataset.append([frame.iloc[-1].at['event_amount']])
+    for num_of_clusters in range(1, 15):
         dataset = np.array(dataset)
         estimator = KMeans(num_of_clusters)  # 构造聚类器
         estimator.fit(dataset)  # 聚类
@@ -193,9 +189,9 @@ def generate_cluster_label(datasets, datafile):
         label_preds.append(label_pred)
         SSE.append(inertia)
     cmpSSE = []
-    for _ in range(22):
+    for _ in range(12):
         cmpSSE.append((SSE[_] - SSE[_ + 1]) / (SSE[_ + 1] - SSE[_ + 2]))
-    for _ in range(22):
+    for _ in range(12):
         if cmpSSE[_] < cmpSSE[_ + 1]:
             num_of_clusters = _ + 2
             break
@@ -269,7 +265,7 @@ if __name__ == '__main__':
     parser.add_argument('--tgt_datasets', default='HK')
     parser.add_argument('--maxepoch', default=1000, type=int)  # 200 for LZD
     parser.add_argument('--loss', default='cross_entropy')
-    parser.add_argument('--mark', default="sub_by_hour_MMD", type=str)
+    parser.add_argument('--mark', default="sub_by_amount_MMD", type=str)
     parser.add_argument('--gamma', default=0.001, type=float)
     args = parser.parse_args()
 
@@ -409,3 +405,4 @@ if __name__ == '__main__':
         eval_wo_update(model, eval_loader)
         print("evaluating test set...")
         eval_wo_update(model, test_loader)
+

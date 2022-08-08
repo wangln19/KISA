@@ -378,7 +378,7 @@ best_auc = 0
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--mode', default='train')  # validate
-    parser.add_argument('--baseroot', default='E:/root/ChenLiyue/ant/sliding_data/LZD/csv')
+    parser.add_argument('--baseroot', default='E:\Transfer_Learning\Data/LZD/csv')
     parser.add_argument('--filepath', default='train_2020-01.csv')
     parser.add_argument('--lr', default=0.001,type=float)
     parser.add_argument('--datasets', default='LZD')
