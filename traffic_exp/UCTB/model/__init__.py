@@ -14,6 +14,10 @@ from .ST_ResNet import ST_ResNet
 
 from .STMeta import STMeta
 
+from .STMeta_transfer import STMeta_transfer
+
+from .STMeta_SDA import STMeta_SDA
+
 from .DCRNN import DCRNN
 
 from .ST_MGCN import ST_MGCN

@@ -1,3 +1,4 @@
+from ast import arg
 import os
 import yaml
 import argparse
@@ -5,8 +6,9 @@ import GPUtil
 import numpy as np
 
 from UCTB.dataset import TransferDataLoader
-from UCTB.model import STMeta
+from UCTB.model import STMeta_transfer,STMeta
 from UCTB.evaluation import metric
+from UCTB.train import EarlyStoppingTTest
 from UCTB.preprocess.GraphGenerator import GraphGenerator
 
 #####################################################################
@@ -19,6 +21,8 @@ parser.add_argument('-tdl', '--target_data_length', default='365', type=str)
 parser.add_argument('-pt', '--pretrain', default='True')
 parser.add_argument('-ft', '--finetune', default='True')
 parser.add_argument('-tr', '--transfer', default='True')
+parser.add_argument('-dm', '--dynamic_mode', default='true',type=str)
+parser.add_argument('-g', '--gamma', default=0.1,type=float)
 
 args = vars(parser.parse_args())
 
@@ -60,6 +64,13 @@ def show_prediction(pretrain, finetune, transfer, target, station_index, start=0
                              '%s.png' % 'station-%s' % station_index), dpi=150)
     plt.close()
 
+
+if args["dynamic_mode"].lower() == 'false':
+    dynamic_mode = False
+else:
+    dynamic_mode = True
+
+
 #####################################################################
 # Generate code_version
 #group = '{}_to_{}'.format(sd_params["city"],td_params["city"])
@@ -71,7 +82,7 @@ sub_code_version = 'C{}P{}T{}_TP'.format(sd_params['closeness_len'], sd_params['
                                              ''.join([e[0].upper() for e in sd_params['graph'].split('-')]))
 
 model_dir_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'model_dir')
-#model_dir_path = os.path.join(model_dir_path, code_version)
+
 
 #####################################################################
 # Config data loader
@@ -80,6 +91,7 @@ data_loader = TransferDataLoader(sd_params, td_params, model_params, td_data_len
 
 pretrain_model_name = 'Pretrain_' + sub_code_version
 finetune_model_name = 'Finetune_' + sub_code_version + '_' + str(data_loader.td_loader.train_sequence_len)
+transfer_model_name = 'SDA_' + sub_code_version + '_' + str(data_loader.td_loader.train_sequence_len)
 
 # build graphs
 sd_graph_obj = GraphGenerator(graph=sd_params['graph'],
@@ -114,14 +126,16 @@ sd_model = STMeta(num_node=data_loader.sd_loader.station_number,
                   **sd_params, **model_params)
 sd_model.build()
 
-td_model = STMeta(num_node=data_loader.td_loader.station_number,
+td_model = STMeta_transfer(num_node=data_loader.td_loader.station_number,
+                  source_num_node=data_loader.sd_loader.station_number,
                   num_graph=td_graph_obj.LM.shape[0],
                   external_dim=data_loader.td_loader.external_dim,
                   tpe_dim=data_loader.td_loader.tpe_dim,
                   code_version=code_version,
                   model_dir=model_dir_path,
-                  save_model_name=finetune_model_name,
+                  save_model_name=transfer_model_name,
                   transfer_ratio=0,
+                  gamma=float(args["gamma"]),
                   gpu_device=current_device,
                   **td_params, **model_params)
 td_model.build()
@@ -147,70 +161,104 @@ print("target test_y shape:",data_loader.td_loader.test_y.shape)
 print('Number of trainable variables', td_model.trainable_vars)
 print('Number of training samples', data_loader.td_loader.train_sequence_len)
 
-if args['pretrain'] == 'True':
-        
-    sd_model.fit(closeness_feature=data_loader.sd_loader.train_closeness,
-                    period_feature=data_loader.sd_loader.train_period,
-                    trend_feature=data_loader.sd_loader.train_trend,
-                    laplace_matrix=sd_graph_obj.LM,
-                    target=data_loader.sd_loader.train_y,
-                    external_feature=data_loader.sd_loader.train_ef,
-                    sequence_length=data_loader.sd_loader.train_sequence_len,
-                    output_names=('loss',),
-                    evaluate_loss_name='loss',
-                    op_names=('train_op',),
-                    batch_size=sd_params['batch_size'],
-                    max_epoch=sd_params['max_epoch'],
-                    validate_ratio=0.1,
-                    early_stop_method='t-test',
-                    early_stop_length=sd_params['early_stop_length'],
-                    early_stop_patience=sd_params['early_stop_patience'],
-                    verbose=True,
-                    save_model_name=pretrain_model_name,
-                    save_model=True)
-    #sd_model.save(pretrain_model_name, global_step=0)
-    
-    td_model.load(pretrain_model_name)
-    td_model.fit(closeness_feature=data_loader.td_loader.train_closeness,
-                    period_feature=data_loader.td_loader.train_period,
-                    trend_feature=data_loader.td_loader.train_trend,
-                    laplace_matrix=td_graph_obj.LM,
-                    target=data_loader.td_loader.train_y,
-                    external_feature=data_loader.td_loader.train_ef,
-                    sequence_length=data_loader.td_loader.train_sequence_len,
-                    output_names=('loss',),
-                    evaluate_loss_name='loss',
-                    op_names=('train_op',),
-                    batch_size=td_params['batch_size'],
-                    max_epoch=td_params['max_epoch'],
-                    validate_ratio=0.1,
-                    early_stop_method='t-test',
-                    early_stop_length=td_params['early_stop_length'],
-                    early_stop_patience=td_params['early_stop_patience'],
-                    verbose=True,
-                    save_model=True,
-                    save_model_name=finetune_model_name
-                    #auto_load_model=False
-                    )
 
-    # 加载训练好的模型
-    td_model.load(finetune_model_name)
-    
+sd_transfer_data = data_loader.sd_loader.train_data[-data_loader.td_loader.train_data.shape[0]:, :]
+
+transfer_closeness, \
+transfer_period, \
+transfer_trend, \
+_ = data_loader.sd_loader.st_move_sample.move_sample(sd_transfer_data)
+
+def dynamic_fm(model_name):
+    sd_model.load(model_name)
+    fm = sd_model.predict(closeness_feature=transfer_closeness,
+                            period_feature=transfer_period,
+                            trend_feature=transfer_trend,
+                            laplace_matrix=sd_graph_obj.LM,
+                            external_feature=data_loader.sd_loader.train_ef,
+                            output_names=['feature_map'],
+                            sequence_length=len(transfer_closeness),
+                            cache_volume=sd_params['batch_size'])
+    return fm['feature_map']
+
+feature_maps = dynamic_fm(pretrain_model_name)
+
+early_stop = EarlyStoppingTTest(td_params['early_stop_length'], td_params['early_stop_patience'])
+best_value = None
+
+# loading model in source domain
+sd_model.load(pretrain_model_name)
+td_model.load(pretrain_model_name)
+
+for epoch in range(1):
+    output = td_model.fit(closeness_feature=data_loader.td_loader.train_closeness,
+                            period_feature=data_loader.td_loader.train_period,
+                            trend_feature=data_loader.td_loader.train_trend,
+                            laplace_matrix=td_graph_obj.LM,
+                            target=data_loader.td_loader.train_y,
+                            external_feature=data_loader.td_loader.train_ef,
+                            source_feature_map=feature_maps,
+                            sequence_length=data_loader.td_loader.train_sequence_len,
+                            output_names=('loss',),
+                            op_names=('train_op',),
+                            batch_size=td_params['batch_size'],
+                            max_epoch=td_params['max_epoch'],
+                            validate_ratio=0.1,
+                            early_stop_method='t-test',
+                            early_stop_length=td_params['early_stop_length'],
+                            early_stop_patience=td_params['early_stop_patience'],
+                            save_model_name=transfer_model_name
+                            )
+
+    # if dynamic_mode:
+    #     feature_maps = dynamic_fm()
+
     prediction = td_model.predict(closeness_feature=data_loader.td_loader.test_closeness,
-                                  period_feature=data_loader.td_loader.test_period,
-                                  trend_feature=data_loader.td_loader.test_trend,
-                                  laplace_matrix=td_graph_obj.LM,
-                                  target=data_loader.td_loader.test_y,
-                                  external_feature=data_loader.td_loader.test_ef,
-                                  output_names=('prediction',),
-                                  sequence_length=data_loader.td_loader.test_sequence_len,
-                                  cache_volume=td_params['batch_size'], )
+                                    period_feature=data_loader.td_loader.test_period,
+                                    trend_feature=data_loader.td_loader.test_trend,
+                                    laplace_matrix=td_graph_obj.LM,
+                                    target=data_loader.td_loader.test_y,
+                                    external_feature=data_loader.td_loader.test_ef,
+                                    output_names=('prediction',),
+                                    sequence_length=data_loader.td_loader.test_sequence_len,
+                                    cache_volume=td_params['batch_size'], )
 
     transfer_prediction = prediction['prediction']
+    test_rmse = metric.rmse(prediction=td_de_normalizer(prediction['prediction']),
+                            target=td_de_normalizer(data_loader.td_loader.test_y), threshold=0)
 
-    test_rmse = metric.rmse(prediction=td_de_normalizer(transfer_prediction),
-                                target=td_de_normalizer(data_loader.td_loader.test_y), threshold=0)
+    
+    
+    # validate_error = output[-1]['val_loss'] if validate_mode == 'val' else test_rmse
 
-    print('#################################################################')
-    print('Target Domain Transfer')
-    print("Test RMSE:",test_rmse)
+    # if early_stop.stop(validate_error):
+    #     break
+
+    # if best_value is None or best_value > validate_error:
+    #     best_value = validate_error
+    #     td_model.save(transfer_model_name, global_step=0)
+
+    print(epoch, 'test rmse', test_rmse)
+
+
+
+# td_model.load(transfer_model_name)
+
+# prediction = td_model.predict(closeness_feature=data_loader.td_loader.test_closeness,
+#                                 period_feature=data_loader.td_loader.test_period,
+#                                 trend_feature=data_loader.td_loader.test_trend,
+#                                 laplace_matrix=td_graph_obj.LM,
+#                                 target=data_loader.td_loader.test_y,
+#                                 external_feature=data_loader.td_loader.test_ef,
+#                                 output_names=('prediction',),
+#                                 sequence_length=data_loader.td_loader.test_sequence_len,
+#                                 cache_volume=td_params['batch_size'], )
+
+# transfer_prediction = prediction['prediction']
+
+# test_rmse = metric.rmse(prediction=td_de_normalizer(transfer_prediction),
+#                             target=td_de_normalizer(data_loader.td_loader.test_y), threshold=0)
+
+# print('#################################################################')
+# print('Target Domain Transfer')
+# print("Test RMSE:",test_rmse)

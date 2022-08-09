@@ -19,7 +19,7 @@ class BaseModel(object):
         gpu_device: To specify the GPU to use. Default: '0'.
     """
 
-    def __init__(self, code_version, model_dir, gpu_device):
+    def __init__(self, code_version, model_dir, gpu_device, save_model_name):
 
         # model input and output
         self._input = {}
@@ -30,6 +30,7 @@ class BaseModel(object):
 
         self._code_version = code_version
         self._model_dir = model_dir
+        self._save_model_name = save_model_name
 
         # TF Graph
         self._graph = tf.Graph()
@@ -125,7 +126,7 @@ class BaseModel(object):
 
         if auto_load_model:
             try:
-                self.load(self._code_version)
+                self.load(save_model_name)
                 print('Found model in disk')
                 if self._converged:
                     print('Model converged, stop training')
@@ -261,14 +262,16 @@ class BaseModel(object):
                                          global_step=global_step)
 
     def _log(self, text):
-        save_dir_subscript = os.path.join(self._log_dir, self._code_version)
+        save_dir_subscript = os.path.join(self._log_dir, self._save_model_name)
         if os.path.isdir(save_dir_subscript) is False:
             os.makedirs(save_dir_subscript)
         with open(os.path.join(save_dir_subscript, 'log.txt'), 'a+', encoding='utf-8') as f:
             f.write(text + '\n')
 
     def _get_log(self):
-        save_dir_subscript = os.path.join(self._log_dir, self._code_version)
+        print("_log_dir:",self._log_dir)
+        print("_save_model_name:",self._save_model_name)
+        save_dir_subscript = os.path.join(self._log_dir, self._save_model_name)
         if os.path.isfile(os.path.join(save_dir_subscript, 'log.txt')):
             with open(os.path.join(save_dir_subscript, 'log.txt'), 'r', encoding='utf-8') as f:
                 return [e.strip('\n') for e in f.readlines()]

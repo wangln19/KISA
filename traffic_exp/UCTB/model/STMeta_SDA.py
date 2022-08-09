@@ -7,7 +7,7 @@ from ..model_unit import DCGRUCell
 from ..model_unit import GCLSTMCell
 
 
-class STMeta(BaseModel):
+class STMeta_SDA(BaseModel):
     """
         Args:
             num_node(int): Number of nodes in the graph, e.g. number of stations in NYC-Bike dataset.
@@ -19,10 +19,10 @@ class STMeta(BaseModel):
             trend_len(int): The length of trend data history. The data of exact same time slots in former consecutive
             ``trend_len`` weeks (every seven days) will be used as trend history.
             input_dim(int): The dimension of input features. 1 if "with_tpe" (data_loader parameters) = False, otherwise 0.
-            num_graph(int): Number of graphs used in STMeta.
+            num_graph(int): Number of graphs used in STMeta_SDA.
             gcn_k(int): The highest order of Chebyshev Polynomial approximation in GCN.
             gcn_layers(int): Number of GCN layers.
-            gclstm_layers(int): Number of STRNN layers, it works on all modes of STMeta such as GCLSTM and DCRNN.
+            gclstm_layers(int): Number of STRNN layers, it works on all modes of STMeta_SDA such as GCLSTM and DCRNN.
             num_hidden_units(int): Number of hidden units of RNN.
             num_dense_units(int): Number of dense units.
             graph_merge_gal_units(int): Number of units in GAL for merging different graph features.
@@ -59,7 +59,8 @@ class STMeta(BaseModel):
                  period_len,
                  trend_len,
                  input_dim=1,
-
+                 
+                 source_num_node=None,
                  # gcn parameters
                  num_graph=1,
                  gcn_k=1,
@@ -85,14 +86,16 @@ class STMeta(BaseModel):
                  output_activation=tf.nn.sigmoid,
 
                  lr=1e-4,
-                 code_version='STMeta-QuickStart',
+                 gamma=1,
+                 code_version='STMeta_SDA-QuickStart',
                  model_dir='model_dir',
                  gpu_device='0', 
                  save_model_name=None,**kwargs):
 
-        super(STMeta, self).__init__(code_version=code_version, model_dir=model_dir, gpu_device=gpu_device,save_model_name=save_model_name)
+        super(STMeta_SDA, self).__init__(code_version=code_version, model_dir=model_dir, gpu_device=gpu_device, save_model_name=save_model_name)
 
         self._num_node = num_node
+        self._source_num_node = source_num_node
         self._input_dim = input_dim
         print("self._input_dim",self._input_dim)
         self._gcn_k = gcn_k
@@ -116,6 +119,7 @@ class STMeta(BaseModel):
         self._num_hidden_unit = num_hidden_units
         self._num_dense_units = num_dense_units
         self._lr = lr
+        self._gamma = gamma
     
     def build(self, init_vars=True, max_to_keep=5):
         with self._graph.as_default():
@@ -147,6 +151,15 @@ class STMeta(BaseModel):
                 self._input['laplace_matrix'] = laplace_matrix.name
             else:
                 raise ValueError('closeness_len, period_len, trend_len cannot all be zero')
+
+            # (batch_size, num_node, 1, feature_dim)
+            source_feature_map = tf.placeholder(tf.float32, [None, self._source_num_node, 1, None],
+                                               name='source_feature_map')
+            self._input['source_feature_map'] = source_feature_map.name
+
+            match_matrix = tf.placeholder(tf.float32, [self._source_num_node, self._num_node],
+                                               name='match_matrix')
+            self._input['match_matrix'] = match_matrix.name
 
             graph_outputs_list = []
 
@@ -277,7 +290,16 @@ class STMeta(BaseModel):
 
             prediction = tf.reshape(pre_output, [-1, self._num_node, 1], name='prediction')
 
-            loss_pre = tf.sqrt(tf.reduce_mean(tf.square(target - prediction)), name='loss')
+            # (batch_size, self._num_node, 1, feature_dim)
+            src_embedding = tf.reshape(tf.transpose(source_feature_map,[0,3,2,1]),[-1,self._source_num_node])
+            #src_dim = src_embedding.get_shape().as_list()
+            embedding_from_source = tf.transpose(tf.reshape(tf.matmul(src_embedding,tf.nn.softmax(match_matrix,axis=1)),[-1,dense_inputs.get_shape()[-1].value,1,self._num_node]),[0,3,2,1])
+            
+            transfer_loss = tf.multiply(tf.reduce_mean(dense_inputs-embedding_from_source), self._gamma, name="transfer_loss")
+
+            regression_loss = tf.sqrt(tf.reduce_mean(tf.square(target - prediction)),name='regression_loss')
+
+            loss_pre = tf.add(transfer_loss, regression_loss, name='loss')
 
             train_op = tf.train.AdamOptimizer(self._lr).minimize(loss_pre, name='train_op')
 
@@ -290,21 +312,27 @@ class STMeta(BaseModel):
             # record train operation
             self._op['train_op'] = train_op.name
 
-        super(STMeta, self).build(init_vars, max_to_keep)
+        super(STMeta_SDA, self).build(init_vars, max_to_keep)
 
     # Define your '_get_feed_dict function‘, map your input to the tf-model
     def _get_feed_dict(self,
                        laplace_matrix,
                        closeness_feature=None,
+                       match_matrix= None,
                        period_feature=None,
                        trend_feature=None,
                        target=None,
+                       source_feature_map=None,
                        external_feature=None):
         feed_dict = {
             'laplace_matrix': laplace_matrix,
         }
         if target is not None:
             feed_dict['target'] = target
+        if source_feature_map is not None:
+            feed_dict['source_feature_map'] = source_feature_map
+        if match_matrix is not None:
+            feed_dict['match_matrix'] = match_matrix
         if self._external_dim is not None and self._external_dim > 0:
             feed_dict['external_feature'] = external_feature
         if self._closeness_len is not None and self._closeness_len > 0:
