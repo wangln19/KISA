@@ -52,8 +52,9 @@ def train(model, train_loader, optimizer, epoch, loss_func=nn.CrossEntropyLoss, 
 
             batch_accuracy = (logits == labels).float().sum().item()
             train_accuracy += batch_accuracy
-            train_epoch_size += batch_size
-            train_loss += loss.item() * batch_size
+            b_size = inputs.shape[1]
+            train_epoch_size += b_size
+            train_loss += loss.item() * b_size
 
     loop.set_postfix(epoch=epoch, loss=train_loss / train_epoch_size, acc=train_accuracy / train_epoch_size)
     writer.add_scalar('loss/train_loss', np.mean(train_loss), epoch)
@@ -64,6 +65,7 @@ def eval(model, eval_loader, optimizer, epoch, loss_func=nn.CrossEntropyLoss, de
     validation_accuracy = 0
     validation_epoch_size = 0
     validation_loss = 0
+    match_loss = 0
     label_list = []
     prob_list = []
     logit_list = []
@@ -86,11 +88,13 @@ def eval(model, eval_loader, optimizer, epoch, loss_func=nn.CrossEntropyLoss, de
                 batch_accuracy = (logits == labels).float().sum().item()
                 validation_accuracy += batch_accuracy
                 validation_epoch_size += 1
-                validation_loss += loss.item() * batch_size
+                validation_loss += loss.item()
+                match_loss += (loss_func.gamma * loss_func.match_loss).item()
                 loop.set_postfix(epoch=epoch, loss=validation_loss / validation_epoch_size,
                                  acc=validation_accuracy / validation_epoch_size)
 
     writer.add_scalar('loss/val_loss', np.mean(validation_loss), epoch)
+    writer.add_scalar('loss/match_loss', np.mean(match_loss), epoch)
 
     global best_auc
     global latest_update_epoch
@@ -99,11 +103,14 @@ def eval(model, eval_loader, optimizer, epoch, loss_func=nn.CrossEntropyLoss, de
     auc = roc_auc_score(label_list, prob_list)
     spauc = roc_auc_score(label_list, prob_list, max_fpr=0.01)
     print(f'Epoch {epoch}, Validation AUC: {auc}, Validation SPAUC: {spauc}')
-    '''more details:
+    '''
+    more details:
     if verbose:
         print(f'Epoch {epoch}, Validation AUC: {auc}, Validation SPAUC: {spauc}')
-        print(classification_report(label_list, logit_list, target_names=['0', '1']))'''
+        print(classification_report(label_list, logit_list, target_names=['0', '1']))
+    '''
 
+    '''
     if auc > best_auc:
         best_auc = auc
         latest_update_epoch = epoch
@@ -122,6 +129,7 @@ def eval(model, eval_loader, optimizer, epoch, loss_func=nn.CrossEntropyLoss, de
                  "latest_update_epoch": latest_update_epoch}
         torch.save(state, model_name)
         print("Updating epoch... auc is {}, best spauc is:{}".format(checkpoint["best_auc"], checkpoint["best_spauc"]))
+    '''
     return np.mean(validation_loss)
 
 
@@ -163,14 +171,21 @@ def eval_wo_update(model, loader, desc='Validation'):
     plt.ylabel('Precision')
     plt.show()
     print(f'min Threshold: {thresholds[0]}, max Threshold: {thresholds[-1]}')
-    print(f'Validation AUC: {auc}, Validation SPAUC: {spauc}')
+    print(f'AUC: {auc}, SPAUC: {spauc}')
     print(classification_report(label_list, logit_list, target_names=['0', '1']))
 
 
 def generate_cluster_label(datasets, datafile):
-    with open('./retrieve_time_running_record/{}_time.pkl'.format(datasets), "rb") as fp:
-        time = pickle.load(fp)
     df = pd.read_csv(datafile)
+    df['event_amount'] = df['event_amount'].apply(lambda x: np.log(x))
+    arr = np.array(df['event_amount'])
+    lef = np.mean(arr) - 3 * np.std(arr)
+    rgt = np.mean(arr) + 3 * np.std(arr)
+    lef = min(arr) if min(arr) > lef else lef
+    rgt = max(arr) if max(arr) < rgt else rgt
+    df['event_amount'] = df['event_amount'].apply(lambda x: rgt if x > rgt else x)
+    df['event_amount'] = df['event_amount'].apply(lambda x: lef if x < lef else x)
+
     dataset = []
     SSE = []
     label_preds = []
@@ -193,7 +208,7 @@ def generate_cluster_label(datasets, datafile):
         cmpSSE.append((SSE[_] - SSE[_ + 1]) / (SSE[_ + 1] - SSE[_ + 2]))
     for _ in range(12):
         if cmpSSE[_] < cmpSSE[_ + 1]:
-            num_of_clusters = _ + 2
+            num_of_clusters = _ + 2 +2
             break
     print("num_of_clusters:", num_of_clusters)
     return label_preds[num_of_clusters-1]
@@ -266,7 +281,7 @@ if __name__ == '__main__':
     parser.add_argument('--maxepoch', default=1000, type=int)  # 200 for LZD
     parser.add_argument('--loss', default='cross_entropy')
     parser.add_argument('--mark', default="sub_by_amount_MMD", type=str)
-    parser.add_argument('--gamma', default=0.001, type=float)
+    parser.add_argument('--gamma', default=0.2, type=float)
     args = parser.parse_args()
 
     src_trainpath = os.path.join(args.src_root, args.filepath)
@@ -344,7 +359,9 @@ if __name__ == '__main__':
                               initial_accumulator_value=0)
     start = 0
     patience = 50
+    early_stopping = EarlyStopping(patience, verbose=False, model_name=tgt_model_name)
 
+    '''
     if os.path.exists(src_model_name):
         src_checkpoint = torch.load(src_model_name)
         src_model = src_checkpoint['model']
@@ -355,6 +372,7 @@ if __name__ == '__main__':
         print('exist {}!'.format(src_model_name))
     else:
         raise FileNotFoundError("initial source model not found.")
+    '''
 
     if os.path.exists(tgt_model_name):
         checkpoint = torch.load(tgt_model_name)
@@ -384,7 +402,6 @@ if __name__ == '__main__':
             tgt_hour_list, tgt_hour_rep_list = generate_representation(model, train_dataset, tgt_label_list)
             loss_func.update_tgt_representation(tgt_hour_list, tgt_hour_rep_list)
 
-            early_stopping = EarlyStopping(patience, verbose=False, model_name=tgt_model_name)
             early_stopping(val_loss, model, optimizer)
             if early_stopping.early_stop:
                 print("Early stopping")

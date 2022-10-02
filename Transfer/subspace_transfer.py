@@ -145,7 +145,7 @@ class TransferLoss(nn.Module):
         alpha = F.softmax(dot_product, dim=0)
         distance = self.calc_representation_distance()
 
-        print("alpha:", alpha)
+        # print("alpha:", alpha)
         # print("alpha:", alpha.device)
         # print("distance:", distance.device)
 
@@ -266,7 +266,7 @@ def eval(model, eval_loader, optimizer, epoch, tgt_month_list, tgt_month_centroi
         torch.save(state, model_name)
         print("Updating epoch... best spauc is {}, auc is:{}".format(checkpoint["best_spauc"],checkpoint["best_auc"]))
     
-def eval_wo_update(model, loader, epoch, desc='Validation', verbose=True, model_name='best_model.pt'):
+def eval_wo_update(model, loader, desc='Validation', verbose=True, model_name='best_model.pt'):
     validation_accuracy = 0
     validation_epoch_size = 0
     validation_loss = 0
@@ -291,13 +291,13 @@ def eval_wo_update(model, loader, epoch, desc='Validation', verbose=True, model_
                 batch_accuracy = (logits == labels).float().sum().item()
                 validation_accuracy += batch_accuracy
                 validation_epoch_size += 1
-                loop.set_postfix(epoch=epoch, acc=validation_accuracy / validation_epoch_size)
+                loop.set_postfix(acc=validation_accuracy / validation_epoch_size)
 
     #print("label_list:",type(label_list[-1][0]),label_list[-1])
     #print("prob_list:",type(prob_list[-1][0]),prob_list[-1])
     auc = roc_auc_score(label_list, prob_list)
     spauc = roc_auc_score(label_list, prob_list,max_fpr=0.01)
-    print(f'Epoch {epoch}, Validation AUC: {auc}, Validation SPAUC: {spauc}')
+    print(f'Validation AUC: {auc}, Validation SPAUC: {spauc}')
     print(classification_report(label_list, logit_list, target_names=['0', '1']))
 
 def generate_tgt_representation(model, data_loader, target_month_name):
@@ -358,11 +358,11 @@ best_auc = 0
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--mode', default='train')  # validate
-    parser.add_argument('--baseroot', default='E:/root/ChenLiyue/ant/sliding_data/LZD/csv')
+    parser.add_argument('--baseroot', default='E:\Transfer_Learning\Data\HK_sample\csv')
     parser.add_argument('--filepath', default='train_2020-01.csv')
     parser.add_argument('--lr', default=0.001,type=float)
-    parser.add_argument('--datasets', default='LZD')
-    parser.add_argument('--maxepoch', default=30, type=int)
+    parser.add_argument('--datasets', default='HK')
+    parser.add_argument('--maxepoch', default=100, type=int)
     parser.add_argument('--gamma', default=0.001, type=float)
     parser.add_argument('--loss', default='cross_entropy')
     # parser.add_argument('--filepath', default='./data/HK.pkl')
@@ -417,7 +417,6 @@ if __name__ == '__main__':
 
 
     input_size = train_dataset[0][0].shape[1]
-    
     writer = SummaryWriter(model_name.replace("pt",""))
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
@@ -429,7 +428,7 @@ if __name__ == '__main__':
     optimizer = optim.Adagrad(model.parameters(), lr=float(args.lr), lr_decay=0, weight_decay=0, initial_accumulator_value=0)
 
     if os.path.exists(da_model_name):
-        print("loading model affer domain adaption...")
+        print("loading model after domain adaption...")
         # 使用DA模型中的参数更新现有的 model_dict
         da_checkpoint = torch.load(da_model_name)
         da_model = da_checkpoint['model']
@@ -441,6 +440,7 @@ if __name__ == '__main__':
         raise FileNotFoundError("domain adaption model not found.")
 
     if os.path.exists(model_name):
+        print('exist{}!'.format(model_name))
         checkpoint = torch.load(model_name)
         model.load_state_dict(checkpoint['model'])
         optimizer.load_state_dict(checkpoint['optimizer'])

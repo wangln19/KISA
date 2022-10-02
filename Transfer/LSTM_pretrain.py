@@ -328,12 +328,12 @@ latest_update_epoch = 0
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--mode', default='train')  # validate
+    parser.add_argument('--mode', default='validate')  # validate
     parser.add_argument('--baseroot', default='E:\Transfer_Learning\Data\HK\csv')
     parser.add_argument('--filepath', default='train_2020-01.csv')
-    parser.add_argument('--lr', default=0.001, type=float)  # 0.00008 for HK lstm
+    parser.add_argument('--lr', default=0.0005, type=float)  # 0.001 for LZD lstm
     parser.add_argument('--datasets', default='HK')
-    parser.add_argument('--maxepoch', default=100, type=int)  # 200/800 for HK lstm
+    parser.add_argument('--maxepoch', default=2000, type=int)  # 200 for LZD lstm
     parser.add_argument('--loss', default='cross_entropy')
     # parser.add_argument('--filepath', default='./data/HK.pkl')
    
@@ -394,7 +394,7 @@ if __name__ == '__main__':
     optimizer = optim.Adagrad(model.parameters(), lr=float(args.lr), lr_decay=0, weight_decay=0,
                               initial_accumulator_value=0)
     start = 0
-    patience = 20
+    patience = 50
     early_stopping = EarlyStopping(patience, verbose=False, model_name=model_name)
 
     if os.path.exists(model_name):

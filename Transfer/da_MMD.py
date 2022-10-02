@@ -1,14 +1,11 @@
-"""
-automatically divide feature space into some subspaces by event amount
-use Mean to calculate the distance between subspaces
-find the matching relationship using the top k tactic
-"""
-
 import torch
 import torch.nn as nn
 from torch.nn.utils.rnn import pad_sequence
 import torch.optim as optim
 from torch.utils.data import DataLoader
+import torch.nn.functional as F
+from torch.autograd import Variable
+import random
 from torch.utils.tensorboard import SummaryWriter, writer
 from sklearn.metrics import roc_auc_score, precision_recall_curve, classification_report
 import pandas as pd
@@ -22,7 +19,6 @@ import matplotlib.pyplot as plt
 from sklearn.cluster import KMeans
 import math
 from Earlystopping import EarlyStopping
-from Loss import TransferMeanLoss
 from Dataset import EncodedDataset
 from Model import LSTMClassifier
 
@@ -90,6 +86,7 @@ def eval(model, eval_loader, optimizer, epoch, loss_func=nn.CrossEntropyLoss, de
                 validation_epoch_size += 1
                 validation_loss += loss.item()
                 match_loss += (loss_func.gamma * loss_func.match_loss).item()
+
                 loop.set_postfix(epoch=epoch, loss=validation_loss / validation_epoch_size,
                                  acc=validation_accuracy / validation_epoch_size)
 
@@ -175,43 +172,15 @@ def eval_wo_update(model, loader, desc='Validation'):
     print(classification_report(label_list, logit_list, target_names=['0', '1']))
 
 
-def generate_cluster_label(datasets, datafile):
+def generate_cluster_label(datafile):
+    num = 0
     df = pd.read_csv(datafile)
-    df['event_amount'] = df['event_amount'].apply(lambda x: np.log(x))
-    arr = np.array(df['event_amount'])
-    lef = np.mean(arr) - 3 * np.std(arr)
-    rgt = np.mean(arr) + 3 * np.std(arr)
-    lef = min(arr) if min(arr) > lef else lef
-    rgt = max(arr) if max(arr) < rgt else rgt
-    df['event_amount'] = df['event_amount'].apply(lambda x: rgt if x > rgt else x)
-    df['event_amount'] = df['event_amount'].apply(lambda x: lef if x < lef else x)
-
-    dataset = []
-    SSE = []
-    label_preds = []
     df_group = df.groupby(['target_event_id'], sort=False)
     for target_event_id, frame in df_group:
         if frame['rn'].iloc[0] != 1:
             continue
-        dataset.append([frame.iloc[-1].at['event_amount']])
-    for num_of_clusters in range(1, 15):
-        dataset = np.array(dataset)
-        estimator = KMeans(num_of_clusters)  # 构造聚类器
-        estimator.fit(dataset)  # 聚类
-        label_pred = estimator.labels_  # 获取聚类标签
-        centroids = estimator.cluster_centers_  # 获取聚类中心
-        inertia = estimator.inertia_
-        label_preds.append(label_pred)
-        SSE.append(inertia)
-    cmpSSE = []
-    for _ in range(12):
-        cmpSSE.append((SSE[_] - SSE[_ + 1]) / (SSE[_ + 1] - SSE[_ + 2]))
-    for _ in range(12):
-        if cmpSSE[_] < cmpSSE[_ + 1]:
-            num_of_clusters = _ + 2 +2
-            break
-    print("num_of_clusters:", num_of_clusters)
-    return label_preds[num_of_clusters-1]
+        num += 1
+    return [1 for _ in range(num)]
 
 
 def load_source_domain_representation(src_label_list, src_model_name):
@@ -260,6 +229,153 @@ def generate_representation(model, dataset, input_label_list):
     return hour_list, hour_rep_list
 
 
+def Guassian_Kernel(source, target, kernel_mul=2.0, kernel_num=5, fix_sigma=None):
+    '''
+    将源域数据和目标域数据转化为核矩阵，即上文中的K
+    Params:
+        source: 源域数据（n * len(x))
+        target: 目标域数据（m * len(y))
+        kernel_mul:
+        kernel_num: 取不同高斯核的数量
+        fix_sigma: 不同高斯核的sigma值
+    Return:
+        sum(kernel_val): 多个核矩阵之和
+    '''
+    n_samples = int(source.size()[0])+int(target.size()[0])  # 求矩阵的行数，一般source和target的尺度是一样的，这样便于计算
+    total = torch.cat([source, target], dim=0)  # 将source,target按列方向合并
+    # 将total复制（n+m）份
+    total0 = total.unsqueeze(0).expand(int(total.size(0)), int(total.size(0)), int(total.size(1)))
+    # 将total的每一行都复制成（n+m）行，即每个数据都扩展成（n+m）份
+    total1 = total.unsqueeze(1).expand(int(total.size(0)), int(total.size(0)), int(total.size(1)))
+    # 求任意两个数据之间的和，得到的矩阵中坐标（i,j）代表total中第i行数据和第j行数据之间的l2 distance(i==j时为0）
+    L2_distance = ((total0-total1)**2).sum(2)
+    # 调整高斯核函数的sigma值
+    if fix_sigma:
+        bandwidth = fix_sigma
+    else:
+        bandwidth = torch.sum(L2_distance.data) / (n_samples**2-n_samples)
+    # 以fix_sigma为中值，以kernel_mul为倍数取kernel_num个bandwidth值（比如fix_sigma为1时，得到[0.25,0.5,1,2,4]
+    bandwidth /= kernel_mul ** (kernel_num // 2)
+    bandwidth_list = [bandwidth * (kernel_mul**i) for i in range(kernel_num)]
+    # 高斯核函数的数学表达式
+    kernel_val = [torch.exp(-L2_distance / bandwidth_temp) for bandwidth_temp in bandwidth_list]
+    # 得到最终的核矩阵
+    return sum(kernel_val)  # /len(kernel_val)
+
+
+def MMD_Loss(source, target, kernel_mul=2.0, kernel_num=5, fix_sigma=None):
+    '''
+    计算源域数据和目标域数据的MMD距离
+    Params:
+        source: 源域数据（n * len(x))
+        target: 目标域数据（m * len(y))
+        kernel_mul:
+        kernel_num: 取不同高斯核的数量
+        fix_sigma: 不同高斯核的sigma值
+    Return:
+        loss: MMD loss
+    '''
+    source, target = torch.Tensor(source), torch.Tensor(target)
+    source, target = Variable(source), Variable(target)
+    batch_size = int(source.size()[0])  # 一般默认为源域和目标域的batchsize相同
+    kernels = Guassian_Kernel(source, target, kernel_mul=kernel_mul, kernel_num=kernel_num, fix_sigma=fix_sigma)
+    # 根据式（3）将核矩阵分成4部分
+    XX = kernels[:batch_size, :batch_size]
+    YY = kernels[batch_size:, batch_size:]
+    XY = kernels[:batch_size, batch_size:]
+    YX = kernels[batch_size:, :batch_size]
+    loss = torch.mean(XX + YY - XY -YX)
+    return float(loss)  # 因为一般都是n==m，所以L矩阵一般不加入计算
+
+
+class TransferMMDLoss(nn.Module):
+    def __init__(self, gamma=0.001):
+        super(TransferMMDLoss, self).__init__()
+        self.gamma = gamma  # trade-off parameters
+        # print("gamma", self.gamma)
+        self.cls = nn.CrossEntropyLoss(weight=torch.Tensor([0.1, 0.8]).to(device))
+
+    def update_src_representation(self, src_hour_list, src_hour_rep_list):
+        self.src_num_space = len(src_hour_list)
+        self.rep_hidden_states = src_hour_rep_list[0].shape[1]
+        self.src_hour_rep_list = src_hour_rep_list
+
+    def update_tgt_representation(self, tgt_hour_list, tgt_hour_rep_list):
+        self.tgt_num_space = len(tgt_hour_list)
+        self.tgt_hour_rep_list = tgt_hour_rep_list
+
+    def select_src_representation(self, num, index):
+        count = 0
+        src_hour_rep = self.src_hour_rep_list[index]
+        if isinstance(src_hour_rep, torch.Tensor):
+            src_hour_rep = src_hour_rep.cpu().numpy()
+        while True:
+            indices = random.sample(range(src_hour_rep.shape[0]), num)
+            slt_src_hour_rep = src_hour_rep[indices]
+            selected_centroid = slt_src_hour_rep.mean(axis=0)
+            ori_centroid = src_hour_rep.mean(axis=0)
+            dist = F.pairwise_distance(torch.from_numpy(ori_centroid.reshape(1, self.rep_hidden_states)),
+                                       torch.from_numpy(selected_centroid.reshape(1, self.rep_hidden_states)), p=2)
+            dist = float(dist)
+            # set select bar = 0.1
+            if dist < 0.1 or num < 30:
+                break
+            else:
+                count += 1
+                if count > 50:
+                    raise RuntimeError("Select Centroid Bar is too Strict.")
+        return slt_src_hour_rep
+
+    def select_tgt_representation(self, num, index):
+        count = 0
+        tgt_hour_rep = self.tgt_hour_rep_list[index]
+        if isinstance(tgt_hour_rep, torch.Tensor):
+            tgt_hour_rep = tgt_hour_rep.cpu().numpy()
+        while True:
+            indices = random.sample(range(tgt_hour_rep.shape[0]), num)
+            slt_tgt_hour_rep = tgt_hour_rep[indices]
+            selected_centroid = slt_tgt_hour_rep.mean(axis=0)
+            ori_centroid = tgt_hour_rep.mean(axis=0)
+            dist = F.pairwise_distance(torch.from_numpy(ori_centroid.reshape(1, self.rep_hidden_states)),
+                                       torch.from_numpy(selected_centroid.reshape(1, self.rep_hidden_states)), p=2)
+            dist = float(dist)
+            # set select bar = 0.1
+            if dist < 0.1 or num < 30:
+                break
+            else:
+                count += 1
+                if count > 50:
+                    raise RuntimeError("Select Centroid Bar is too Strict.")
+        return slt_tgt_hour_rep
+
+    def calc_representation_distance(self):
+        dists = []
+        for _ in range(self.tgt_num_space):
+            dist = []
+            for __ in range(self.src_num_space):
+                if len(self.tgt_hour_rep_list[_]) <= len(self.src_hour_rep_list[__]):
+                    slt_src_rep = self.select_src_representation(len(self.tgt_hour_rep_list[_]), __)
+                    if isinstance(self.tgt_hour_rep_list[_], torch.Tensor):
+                        self.tgt_hour_rep_list[_] = self.tgt_hour_rep_list[_].cpu().numpy()
+                    dist.append(MMD_Loss(slt_src_rep, self.tgt_hour_rep_list[_]))
+                else:
+                    slt_tgt_rep = self.select_tgt_representation(len(self.src_hour_rep_list[__]), _)
+                    if isinstance(self.src_hour_rep_list[__], torch.Tensor):
+                        self.src_hour_rep_list[__] = self.src_hour_rep_list[__].cpu().numpy()
+                    dist.append(MMD_Loss(self.src_hour_rep_list[__], slt_tgt_rep))
+            dists.append(dist)
+        distance = np.array(dists)  # (self.tgt_num_space, self.src_num_spaces)
+        return distance
+
+    def calculate_match_loss(self, top_k=1):
+        match_loss = self.calc_representation_distance()
+        self.match_loss = match_loss[0, 0]
+
+    def forward(self, prob, labels):
+        cls_loss = self.cls(prob, labels)
+        return cls_loss + self.gamma * self.match_loss
+
+
 input_size = None
 hidden_size = 300
 layer_num = 2
@@ -271,17 +387,17 @@ latest_update_epoch = 0
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--mode', default='validate')  # validate
-    parser.add_argument('--src_root', default='E:\Transfer_Learning\Data\LZD\csv')
-    parser.add_argument('--tgt_root', default='E:\Transfer_Learning\Data\HK\csv')
+    parser.add_argument('--mode', default='train')  # validate
+    parser.add_argument('--src_root', default='../Data/LZD/csv')
+    parser.add_argument('--tgt_root', default='../Data/HK/csv')
     parser.add_argument('--filepath', default='train_2020-01.csv')
     parser.add_argument('--lr', default=0.0001, type=float)  # 0.001 for LZD
     parser.add_argument('--src_datasets', default='LZD')
     parser.add_argument('--tgt_datasets', default='HK')
     parser.add_argument('--maxepoch', default=1000, type=int)  # 200 for LZD
     parser.add_argument('--loss', default='cross_entropy')
-    parser.add_argument('--mark', default="sub_by_amount", type=str)
-    parser.add_argument('--gamma', default=0.5, type=float)
+    parser.add_argument('--mark', default="da_MMD", type=str)
+    parser.add_argument('--gamma', default=0.2, type=float)
     args = parser.parse_args()
 
     src_trainpath = os.path.join(args.src_root, args.filepath)
@@ -374,7 +490,6 @@ if __name__ == '__main__':
         raise FileNotFoundError("initial source model not found.")
     '''
 
-    # tgt_model_name = 'HK_2020-01_sub_by_amount_selected_by_val_loss.pt'
     if os.path.exists(tgt_model_name):
         checkpoint = torch.load(tgt_model_name)
         model.load_state_dict(checkpoint['model'])
@@ -384,11 +499,11 @@ if __name__ == '__main__':
         latest_update_epoch = checkpoint["latest_update_epoch"]
         print('exist {}! restart from {}'.format(tgt_model_name, start))
 
-    src_label_list = generate_cluster_label(args.src_datasets, src_trainpath)
+    src_label_list = generate_cluster_label(src_trainpath)
     src_hour_list, src_hour_rep_list = load_source_domain_representation(src_label_list, src_model_name)
-    tgt_label_list = generate_cluster_label(args.tgt_datasets, tgt_trainpath)
+    tgt_label_list = generate_cluster_label(tgt_trainpath)
     tgt_hour_list, tgt_hour_rep_list = generate_representation(model, train_dataset, tgt_label_list)
-    loss_func = TransferMeanLoss(gamma=float(args.gamma))
+    loss_func = TransferMMDLoss(gamma=float(args.gamma))
     loss_func.update_src_representation(src_hour_list, src_hour_rep_list)
     loss_func.update_tgt_representation(tgt_hour_list, tgt_hour_rep_list)
 

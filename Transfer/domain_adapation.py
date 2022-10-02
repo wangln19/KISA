@@ -1,3 +1,8 @@
+"""
+note: HK's data usually has a len of 20, meaning record 20 time slots before the target time slot
+      HK's data all have 179 features for each time slot, while the LZD have 236
+"""
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -76,6 +81,7 @@ class LSTMClassifier(nn.Module):
         representation = torch.stack(representation, dim=0)
 
         return representation, self.dropout(self.fc(representation))
+
 
 class DomainAdaptionLoss(nn.Module):
     def __init__(self, src_rep_0, src_rep_1, lamda=0.1):
@@ -215,7 +221,7 @@ def eval(model, eval_loader, optimizer, epoch, loss_func=nn.CrossEntropyLoss, de
         torch.save(state, model_name)
         print("Updating epoch... best spauc is {}, auc is:{}".format(checkpoint["best_spauc"],checkpoint["best_auc"]))
     
-def eval_wo_update(model, loader, epoch, loss_func=nn.CrossEntropyLoss, desc='Validation', verbose=True, model_name='best_model.pt'):
+def eval_wo_update(model, loader, loss_func=nn.CrossEntropyLoss, desc='Validation', verbose=True, model_name='best_model.pt'):
     validation_accuracy = 0
     validation_epoch_size = 0
     validation_loss = 0
@@ -242,7 +248,7 @@ def eval_wo_update(model, loader, epoch, loss_func=nn.CrossEntropyLoss, desc='Va
                 validation_accuracy += batch_accuracy
                 validation_epoch_size += 1
                 validation_loss += loss.item() * batch_size
-                loop.set_postfix(epoch=epoch, loss=validation_loss / validation_epoch_size,
+                loop.set_postfix(loss=validation_loss / validation_epoch_size,
                                  acc=validation_accuracy / validation_epoch_size)
 
 
@@ -250,7 +256,7 @@ def eval_wo_update(model, loader, epoch, loss_func=nn.CrossEntropyLoss, desc='Va
     #print("prob_list:",type(prob_list[-1][0]),prob_list[-1])
     auc = roc_auc_score(label_list, prob_list)
     spauc = roc_auc_score(label_list, prob_list,max_fpr=0.01)
-    print(f'Epoch {epoch}, Validation AUC: {auc}, Validation SPAUC: {spauc}')
+    print(f'Validation AUC: {auc}, Validation SPAUC: {spauc}')
     print(classification_report(label_list, logit_list, target_names=['0', '1']))
 
 def generate_representation(model, data_loader):
@@ -274,7 +280,7 @@ def generate_representation(model, data_loader):
 
 def load_source_domain_representation(source_rep_name):
     '''
-    return src_rep_0, src_rep_1
+    return src_rep_0, src_rep_1 shape:(hidden_size, )
     '''
     with open(source_rep_name + "_rep.pkl","rb") as fp:
         data = pickle.load(fp)
@@ -293,15 +299,14 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 best_auc = 0
 
 
-
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--mode', default='train')  # validate
-    parser.add_argument('--baseroot', default='E:/root/ChenLiyue/ant/sliding_data/LZD/csv')
+    parser.add_argument('--baseroot', default='E:\Transfer_Learning\Data\HK_sample\csv')
     parser.add_argument('--filepath', default='train_2020-01.csv')
     parser.add_argument('--lr', default=0.001,type=float)
-    parser.add_argument('--datasets', default='LZD')
-    parser.add_argument('--maxepoch', default=30, type=int)
+    parser.add_argument('--datasets', default='HK')
+    parser.add_argument('--maxepoch', default=100, type=int)
     parser.add_argument('--loss', default='cross_entropy')
     # parser.add_argument('--filepath', default='./data/HK.pkl')
    
@@ -351,7 +356,6 @@ if __name__ == '__main__':
         with open(testOutputName, "wb") as fp:
             pickle.dump(test_dataset,fp)
 
-
     input_size = train_dataset[0][0].shape[1]
     
     writer = SummaryWriter(model_name.replace("pt",""))
@@ -369,6 +373,8 @@ if __name__ == '__main__':
         model.load_state_dict(checkpoint['model'])
         optimizer.load_state_dict(checkpoint['optimizer'])
         start = checkpoint['epoch'] + 1
+        print('start:', start)
+        print('exists {}!'.format(model_name))
         best_auc = checkpoint["best_auc"]
     
     source_name = "LZD_2020-01_lstm"

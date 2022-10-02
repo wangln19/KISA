@@ -67,7 +67,7 @@ class EarlyStopping:
         state = {'model': model.state_dict(), 'optimizer': optimizer.state_dict(), 'epoch': 0,
                  "best_auc": 1, "best_spauc": 1, "latest_update_epoch": 0}
         # save the model with min val loss, so indexes like epoch, beat_auc... is meaningless
-        torch.save(state, self.model_name.replace('.pt', '_selected_by_val_loss.pt'))
+        torch.save(state, self.model_name)  # self.model_name.replace('.pt', '_selected_by_val_loss.pt')
         self.val_loss_min = val_loss
 
 
@@ -180,6 +180,7 @@ def train(model, train_loader, optimizer, epoch, loss_func_name='cross_entropy',
     with tqdm(enumerate(train_loader), desc=desc) as loop:
         for i, batch in loop:
             inputs, labels, lengths = batch
+            b_size = inputs.shape[1]
             model.zero_grad()
             rep, prob = model(inputs, lengths)
             logits = torch.argmax(prob, dim=-1)
@@ -190,8 +191,8 @@ def train(model, train_loader, optimizer, epoch, loss_func_name='cross_entropy',
 
             batch_accuracy = (logits == labels).float().sum().item()
             train_accuracy += batch_accuracy
-            train_epoch_size += batch_size
-            train_loss += loss.item() * batch_size
+            train_epoch_size += b_size
+            train_loss += loss.item() * b_size
 
     loop.set_postfix(epoch=epoch, loss=train_loss / train_epoch_size, acc=train_accuracy / train_epoch_size)
     writer.add_scalar('loss/train_loss', np.mean(train_loss), epoch)
@@ -226,7 +227,7 @@ def eval(model, eval_loader, optimizer, epoch, loss_func_name='cross_entropy', d
                 batch_accuracy = (logits == labels).float().sum().item()
                 validation_accuracy += batch_accuracy
                 validation_epoch_size += 1
-                validation_loss += loss.item() * batch_size
+                validation_loss += loss.item()
                 loop.set_postfix(epoch=epoch, loss=validation_loss / validation_epoch_size,
                                  acc=validation_accuracy / validation_epoch_size)
 
@@ -239,11 +240,14 @@ def eval(model, eval_loader, optimizer, epoch, loss_func_name='cross_entropy', d
     auc = roc_auc_score(label_list, prob_list)
     spauc = roc_auc_score(label_list, prob_list, max_fpr=0.01)
     print(f'Epoch {epoch}, Validation AUC: {auc}, Validation SPAUC: {spauc}')
-    '''more details:
+    '''
+    more details:
     if verbose:
         print(f'Epoch {epoch}, Validation AUC: {auc}, Validation SPAUC: {spauc}')
-        print(classification_report(label_list, logit_list, target_names=['0', '1']))'''
+        print(classification_report(label_list, logit_list, target_names=['0', '1']))
+    '''
 
+    '''
     if auc > best_auc:
         best_auc = auc
         latest_update_epoch = epoch
@@ -262,6 +266,7 @@ def eval(model, eval_loader, optimizer, epoch, loss_func_name='cross_entropy', d
                  "latest_update_epoch": latest_update_epoch}
         torch.save(state, model_name)
         print("Updating epoch... auc is {}, best spauc is:{}".format(checkpoint["best_auc"], checkpoint["best_spauc"]))
+    '''
     return validation_loss
 
 
@@ -296,7 +301,7 @@ def eval_wo_update(model, loader, loss_func_name='cross_entropy', desc='Validati
                 batch_accuracy = (logits == labels).float().sum().item()
                 validation_accuracy += batch_accuracy
                 validation_epoch_size += 1
-                validation_loss += loss.item() * batch_size
+                validation_loss += loss.item()
                 loop.set_postfix(loss=validation_loss / validation_epoch_size,
                                  acc=validation_accuracy / validation_epoch_size)
 
@@ -318,7 +323,7 @@ def eval_wo_update(model, loader, loss_func_name='cross_entropy', desc='Validati
     plt.ylabel('Precision')
     plt.show()
     print(f'min Threshold: {thresholds[0]}, max Threshold: {thresholds[-1]}')
-    print(f'Validation AUC: {auc}, Validation SPAUC: {spauc}')
+    print(f'AUC: {auc}, SPAUC: {spauc}')
     print(classification_report(label_list, logit_list, target_names=['0', '1']))
 
 
@@ -336,11 +341,11 @@ if __name__ == '__main__':
     parser.add_argument('--mode', default='generate')  # validate
     parser.add_argument('--src_root', default='E:\Transfer_Learning\Data\LZD\csv')
     parser.add_argument('--tgt_root', default='E:\Transfer_Learning\Data\HK\csv')
-    parser.add_argument('--filepath', default='train_2020-01.csv')
-    parser.add_argument('--lr', default=0.00001, type=float)  # 0.001 for LZD
+    parser.add_argument('--filepath', default='train_2020-02.csv')
+    parser.add_argument('--lr', default=0.001, type=float)  # 0.001 for LZD
     parser.add_argument('--src_datasets', default='LZD')
     parser.add_argument('--tgt_datasets', default='HK')
-    parser.add_argument('--maxepoch', default=100, type=int)  # 200 for LZD
+    parser.add_argument('--maxepoch', default=2000, type=int)  # 200 for LZD
     parser.add_argument('--loss', default='cross_entropy')
     parser.add_argument('--finetune', default=False)
     parser.add_argument('--mark', default="finetune", type=str)
@@ -438,6 +443,10 @@ if __name__ == '__main__':
                               initial_accumulator_value=0)
     start = 0
     patience = 20
+    if not args.finetune:
+        early_stopping = EarlyStopping(patience, verbose=False, model_name=src_model_name)
+    else:
+        early_stopping = EarlyStopping(patience, verbose=False, model_name=tgt_model_name)
 
     if not args.finetune:
         if os.path.exists(src_model_name):
@@ -449,6 +458,7 @@ if __name__ == '__main__':
             latest_update_epoch = checkpoint["latest_update_epoch"]
             print('exist{}! start from {}'.format(src_model_name, start))
     else:
+
         if os.path.exists(src_model_name):
             checkpoint = torch.load(src_model_name)
             model.load_state_dict(checkpoint['model'])
@@ -457,29 +467,33 @@ if __name__ == '__main__':
         else:
             raise FileNotFoundError("initial extractor model not found.")
 
+        if os.path.exists(tgt_model_name):
+            checkpoint = torch.load(tgt_model_name)
+            model.load_state_dict(checkpoint['model'])
+            optimizer.load_state_dict(checkpoint['optimizer'])
+            start = checkpoint['epoch'] + 1
+            best_auc = checkpoint["best_auc"]
+            latest_update_epoch = checkpoint["latest_update_epoch"]
+            print('exist{}! start from {}'.format(src_model_name, start))
+            # print(f'lr = {optimizer}')
+
     if args.mode == 'train':
         for epoch in range(start, int(args.maxepoch)):
             train(model, train_loader, optimizer, epoch, loss_func_name=args.loss)
             if not args.finetune:
                 val_loss = eval(model, eval_loader, optimizer, epoch, loss_func_name=args.loss, model_name=src_model_name)
-                early_stopping = EarlyStopping(patience, verbose=False, model_name=src_model_name)
-                early_stopping(val_loss, model, optimizer)
-                if early_stopping.early_stop:
-                    print("Early stopping")
-                    break
             else:
                 val_loss = eval(model, eval_loader, optimizer, epoch, loss_func_name=args.loss, model_name=tgt_model_name)
-                early_stopping = EarlyStopping(patience, verbose=False, model_name=tgt_model_name)
-                early_stopping(val_loss, model, optimizer)
-                if early_stopping.early_stop:
-                    print("Early stopping")
-                    break
+            early_stopping(val_loss, model, optimizer)
+            if early_stopping.early_stop:
+                print("Early stopping")
+                break
         if not args.finetune:
             checkpoint = torch.load(src_model_name)
         else:
             checkpoint = torch.load(tgt_model_name)
         model.load_state_dict(checkpoint["model"])
-        print(f'latest update epoch: {latest_update_epoch}')
+        # print(f'latest update epoch: {latest_update_epoch}')
         print("evaluating val set...")
         eval_wo_update(model, eval_loader, loss_func_name=args.loss)
         print("evaluating test set...")
@@ -487,6 +501,7 @@ if __name__ == '__main__':
 
     elif args.mode == 'validate':
         model.load_state_dict(checkpoint["model"])
+        # print(f'latest update epoch: {latest_update_epoch}')
         print("evaluating val set...")
         eval_wo_update(model, eval_loader, loss_func_name=args.loss)
         print("evaluating test set...")

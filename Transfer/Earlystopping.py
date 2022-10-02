@@ -50,5 +50,5 @@ class EarlyStopping:
         state = {'model': model.state_dict(), 'optimizer': optimizer.state_dict(), 'epoch': 0,
                  "best_auc": 1, "best_spauc": 1, "latest_update_epoch": 0}
         # save the model with min val loss, so indexes like epoch, beat_auc... is meaningless
-        torch.save(state, self.model_name.replace('.pt', '_selected_by_val_loss.pt'))
+        torch.save(state, self.model_name)  # .replace('.pt', '_selected_by_val_loss.pt')
         self.val_loss_min = val_loss

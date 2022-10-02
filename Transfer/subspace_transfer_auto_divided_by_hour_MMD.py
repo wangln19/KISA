@@ -52,8 +52,9 @@ def train(model, train_loader, optimizer, epoch, loss_func=nn.CrossEntropyLoss, 
 
             batch_accuracy = (logits == labels).float().sum().item()
             train_accuracy += batch_accuracy
-            train_epoch_size += batch_size
-            train_loss += loss.item() * batch_size
+            b_size = inputs.shape[1]
+            train_epoch_size += b_size
+            train_loss += loss.item() * b_size
 
     loop.set_postfix(epoch=epoch, loss=train_loss / train_epoch_size, acc=train_accuracy / train_epoch_size)
     writer.add_scalar('loss/train_loss', np.mean(train_loss), epoch)
@@ -64,6 +65,7 @@ def eval(model, eval_loader, optimizer, epoch, loss_func=nn.CrossEntropyLoss, de
     validation_accuracy = 0
     validation_epoch_size = 0
     validation_loss = 0
+    match_loss = 0
     label_list = []
     prob_list = []
     logit_list = []
@@ -86,11 +88,13 @@ def eval(model, eval_loader, optimizer, epoch, loss_func=nn.CrossEntropyLoss, de
                 batch_accuracy = (logits == labels).float().sum().item()
                 validation_accuracy += batch_accuracy
                 validation_epoch_size += 1
-                validation_loss += loss.item() * batch_size
+                validation_loss += loss.item() 
+                match_loss += (loss_func.gamma * loss_func.match_loss).item() 
                 loop.set_postfix(epoch=epoch, loss=validation_loss / validation_epoch_size,
                                  acc=validation_accuracy / validation_epoch_size)
 
     writer.add_scalar('loss/val_loss', np.mean(validation_loss), epoch)
+    writer.add_scalar('loss/match_loss', np.mean(match_loss), epoch)
 
     global best_auc
     global latest_update_epoch
@@ -99,11 +103,14 @@ def eval(model, eval_loader, optimizer, epoch, loss_func=nn.CrossEntropyLoss, de
     auc = roc_auc_score(label_list, prob_list)
     spauc = roc_auc_score(label_list, prob_list, max_fpr=0.01)
     print(f'Epoch {epoch}, Validation AUC: {auc}, Validation SPAUC: {spauc}')
-    '''more details:
+    '''
+    more details:
     if verbose:
         print(f'Epoch {epoch}, Validation AUC: {auc}, Validation SPAUC: {spauc}')
-        print(classification_report(label_list, logit_list, target_names=['0', '1']))'''
+        print(classification_report(label_list, logit_list, target_names=['0', '1']))
+    '''
 
+    '''
     if auc > best_auc:
         best_auc = auc
         latest_update_epoch = epoch
@@ -122,6 +129,7 @@ def eval(model, eval_loader, optimizer, epoch, loss_func=nn.CrossEntropyLoss, de
                  "latest_update_epoch": latest_update_epoch}
         torch.save(state, model_name)
         print("Updating epoch... auc is {}, best spauc is:{}".format(checkpoint["best_auc"], checkpoint["best_spauc"]))
+    '''
     return np.mean(validation_loss)
 
 
@@ -163,7 +171,7 @@ def eval_wo_update(model, loader, desc='Validation'):
     plt.ylabel('Precision')
     plt.show()
     print(f'min Threshold: {thresholds[0]}, max Threshold: {thresholds[-1]}')
-    print(f'Validation AUC: {auc}, Validation SPAUC: {spauc}')
+    print(f'AUC: {auc}, SPAUC: {spauc}')
     print(classification_report(label_list, logit_list, target_names=['0', '1']))
 
 
@@ -260,17 +268,17 @@ latest_update_epoch = 0
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--mode', default='validate')  # validate
-    parser.add_argument('--src_root', default='E:\Transfer_Learning\Data\LZD\csv')
-    parser.add_argument('--tgt_root', default='E:\Transfer_Learning\Data\HK\csv')
+    parser.add_argument('--mode', default='train')  # validate
+    parser.add_argument('--src_root', default='../Data/LZD/csv')
+    parser.add_argument('--tgt_root', default='../Data/HK/csv')
     parser.add_argument('--filepath', default='train_2020-01.csv')
     parser.add_argument('--lr', default=0.0001, type=float)  # 0.001 for LZD
     parser.add_argument('--src_datasets', default='LZD')
     parser.add_argument('--tgt_datasets', default='HK')
-    parser.add_argument('--maxepoch', default=1000, type=int)  # 200 for LZD
+    parser.add_argument('--maxepoch', default=2000, type=int)  # 200 for LZD
     parser.add_argument('--loss', default='cross_entropy')
     parser.add_argument('--mark', default="sub_by_hour_MMD", type=str)
-    parser.add_argument('--gamma', default=0.001, type=float)
+    parser.add_argument('--gamma', default=0.5, type=float)  # 0.001 
     args = parser.parse_args()
 
     src_trainpath = os.path.join(args.src_root, args.filepath)
@@ -348,7 +356,9 @@ if __name__ == '__main__':
                               initial_accumulator_value=0)
     start = 0
     patience = 50
+    early_stopping = EarlyStopping(patience, verbose=False, model_name=tgt_model_name)
 
+    '''
     if os.path.exists(src_model_name):
         src_checkpoint = torch.load(src_model_name)
         src_model = src_checkpoint['model']
@@ -359,6 +369,7 @@ if __name__ == '__main__':
         print('exist {}!'.format(src_model_name))
     else:
         raise FileNotFoundError("initial source model not found.")
+    '''
 
     if os.path.exists(tgt_model_name):
         checkpoint = torch.load(tgt_model_name)
@@ -388,7 +399,6 @@ if __name__ == '__main__':
             tgt_hour_list, tgt_hour_rep_list = generate_representation(model, train_dataset, tgt_label_list)
             loss_func.update_tgt_representation(tgt_hour_list, tgt_hour_rep_list)
 
-            early_stopping = EarlyStopping(patience, verbose=False, model_name=tgt_model_name)
             early_stopping(val_loss, model, optimizer)
             if early_stopping.early_stop:
                 print("Early stopping")
@@ -404,7 +414,6 @@ if __name__ == '__main__':
 
     elif args.mode == 'validate':
         model.load_state_dict(checkpoint["model"])
-        print(f'latest update epoch: {latest_update_epoch}')
         print("evaluating val set...")
         eval_wo_update(model, eval_loader)
         print("evaluating test set...")

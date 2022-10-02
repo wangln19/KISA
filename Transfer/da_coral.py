@@ -1,14 +1,9 @@
-"""
-automatically divide feature space into some subspaces by event amount
-use Mean to calculate the distance between subspaces
-find the matching relationship using the top k tactic
-"""
-
 import torch
 import torch.nn as nn
 from torch.nn.utils.rnn import pad_sequence
 import torch.optim as optim
 from torch.utils.data import DataLoader
+import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter, writer
 from sklearn.metrics import roc_auc_score, precision_recall_curve, classification_report
 import pandas as pd
@@ -19,12 +14,44 @@ from tqdm import tqdm
 import argparse
 import seaborn as sns
 import matplotlib.pyplot as plt
-from sklearn.cluster import KMeans
+from scipy.spatial.distance import pdist, squareform
 import math
 from Earlystopping import EarlyStopping
-from Loss import TransferMeanLoss
+from Loss import TransferCoralLoss
 from Dataset import EncodedDataset
 from Model import LSTMClassifier
+import time
+
+
+def load_source_domain_representation(src_model_name):
+    """
+    return src_rep
+    """
+    with open(src_model_name.replace(".pt", "_rep.pkl"), "rb") as fp:
+        data = pickle.load(fp)
+        labels = np.array(data["label"])
+        reps = data["rep"]
+
+    return reps
+
+
+def generate_representation(model, dataset):
+    loader = DataLoader(dataset, batch_size=32, shuffle=False, collate_fn=collate_fn)
+    label_list = []
+    rep_list = []
+    model.eval()
+    with torch.no_grad():
+        with tqdm(enumerate(loader), desc="loading representation...") as loop:
+            for i, batch in loop:
+                inputs, labels, lengths = batch
+                rep, _ = model(inputs, lengths)
+                for __ in rep:
+                    rep_list.append(__)
+                for __ in labels.cpu().numpy():
+                    label_list.append(__)
+
+    reps = torch.stack(rep_list, axis=0).squeeze().cpu().numpy()
+    return reps
 
 
 def collate_fn(batch):
@@ -66,6 +93,7 @@ def eval(model, eval_loader, optimizer, epoch, loss_func=nn.CrossEntropyLoss, de
     validation_epoch_size = 0
     validation_loss = 0
     match_loss = 0
+    # da_loss = 0
     label_list = []
     prob_list = []
     logit_list = []
@@ -90,11 +118,13 @@ def eval(model, eval_loader, optimizer, epoch, loss_func=nn.CrossEntropyLoss, de
                 validation_epoch_size += 1
                 validation_loss += loss.item()
                 match_loss += (loss_func.gamma * loss_func.match_loss).item()
+                # da_loss += (loss_func.da_gamma * loss_func.da_loss).item()
                 loop.set_postfix(epoch=epoch, loss=validation_loss / validation_epoch_size,
                                  acc=validation_accuracy / validation_epoch_size)
 
     writer.add_scalar('loss/val_loss', np.mean(validation_loss), epoch)
     writer.add_scalar('loss/match_loss', np.mean(match_loss), epoch)
+    # writer.add_scalar('loss/da_loss', np.mean(da_loss), epoch)
 
     global best_auc
     global latest_update_epoch
@@ -175,91 +205,6 @@ def eval_wo_update(model, loader, desc='Validation'):
     print(classification_report(label_list, logit_list, target_names=['0', '1']))
 
 
-def generate_cluster_label(datasets, datafile):
-    df = pd.read_csv(datafile)
-    df['event_amount'] = df['event_amount'].apply(lambda x: np.log(x))
-    arr = np.array(df['event_amount'])
-    lef = np.mean(arr) - 3 * np.std(arr)
-    rgt = np.mean(arr) + 3 * np.std(arr)
-    lef = min(arr) if min(arr) > lef else lef
-    rgt = max(arr) if max(arr) < rgt else rgt
-    df['event_amount'] = df['event_amount'].apply(lambda x: rgt if x > rgt else x)
-    df['event_amount'] = df['event_amount'].apply(lambda x: lef if x < lef else x)
-
-    dataset = []
-    SSE = []
-    label_preds = []
-    df_group = df.groupby(['target_event_id'], sort=False)
-    for target_event_id, frame in df_group:
-        if frame['rn'].iloc[0] != 1:
-            continue
-        dataset.append([frame.iloc[-1].at['event_amount']])
-    for num_of_clusters in range(1, 15):
-        dataset = np.array(dataset)
-        estimator = KMeans(num_of_clusters)  # 构造聚类器
-        estimator.fit(dataset)  # 聚类
-        label_pred = estimator.labels_  # 获取聚类标签
-        centroids = estimator.cluster_centers_  # 获取聚类中心
-        inertia = estimator.inertia_
-        label_preds.append(label_pred)
-        SSE.append(inertia)
-    cmpSSE = []
-    for _ in range(12):
-        cmpSSE.append((SSE[_] - SSE[_ + 1]) / (SSE[_ + 1] - SSE[_ + 2]))
-    for _ in range(12):
-        if cmpSSE[_] < cmpSSE[_ + 1]:
-            num_of_clusters = _ + 2 +2
-            break
-    print("num_of_clusters:", num_of_clusters)
-    return label_preds[num_of_clusters-1]
-
-
-def load_source_domain_representation(src_label_list, src_model_name):
-    """
-    return src_rep
-    """
-    with open(src_model_name.replace(".pt", "_rep.pkl"), "rb") as fp:
-        data = pickle.load(fp)
-        labels = np.array(data["label"])
-        reps = data["rep"]
-    hour_indicator = np.array(src_label_list)
-
-    hour_list = np.unique(hour_indicator)
-    hour_rep_list = []
-    for lab in hour_list:
-        indices = np.where(hour_indicator == lab)[0]
-        hour_rep_list.append(reps[indices])
-
-    return hour_list, hour_rep_list
-
-
-def generate_representation(model, dataset, input_label_list):
-    loader = DataLoader(dataset, batch_size=32, shuffle=False, collate_fn=collate_fn)
-    label_list = []
-    rep_list = []
-    model.eval()
-    with torch.no_grad():
-        with tqdm(enumerate(loader), desc="loading representation...") as loop:
-            for i, batch in loop:
-                inputs, labels, lengths = batch
-                rep, _ = model(inputs, lengths)
-                for _ in rep:
-                    rep_list.append(_)
-                label_list.append(labels.cpu().numpy())
-
-    reps = torch.stack(rep_list, axis=0).squeeze()
-    # labels = np.array(label_list)
-
-    hour_indicator = np.array(input_label_list)
-
-    hour_list = np.unique(hour_indicator)
-    hour_rep_list = []
-    for lab in hour_list:
-        indices = np.where(hour_indicator == lab)[0]
-        hour_rep_list.append(reps[indices])
-    return hour_list, hour_rep_list
-
-
 input_size = None
 hidden_size = 300
 layer_num = 2
@@ -271,16 +216,16 @@ latest_update_epoch = 0
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--mode', default='validate')  # validate
+    parser.add_argument('--mode', default='train')  # validate
     parser.add_argument('--src_root', default='E:\Transfer_Learning\Data\LZD\csv')
     parser.add_argument('--tgt_root', default='E:\Transfer_Learning\Data\HK\csv')
     parser.add_argument('--filepath', default='train_2020-01.csv')
     parser.add_argument('--lr', default=0.0001, type=float)  # 0.001 for LZD
     parser.add_argument('--src_datasets', default='LZD')
     parser.add_argument('--tgt_datasets', default='HK')
-    parser.add_argument('--maxepoch', default=1000, type=int)  # 200 for LZD
+    parser.add_argument('--maxepoch', default=2000, type=int)  # 200 for LZD
     parser.add_argument('--loss', default='cross_entropy')
-    parser.add_argument('--mark', default="sub_by_amount", type=str)
+    parser.add_argument('--mark', default="da_coral", type=str)
     parser.add_argument('--gamma', default=0.5, type=float)
     args = parser.parse_args()
 
@@ -357,6 +302,7 @@ if __name__ == '__main__':
     model = LSTMClassifier(input_size, hidden_size, layer_num).to(device)
     optimizer = optim.Adagrad(model.parameters(), lr=float(args.lr), lr_decay=0, weight_decay=0,
                               initial_accumulator_value=0)
+
     start = 0
     patience = 50
     early_stopping = EarlyStopping(patience, verbose=False, model_name=tgt_model_name)
@@ -374,7 +320,6 @@ if __name__ == '__main__':
         raise FileNotFoundError("initial source model not found.")
     '''
 
-    # tgt_model_name = 'HK_2020-01_sub_by_amount_selected_by_val_loss.pt'
     if os.path.exists(tgt_model_name):
         checkpoint = torch.load(tgt_model_name)
         model.load_state_dict(checkpoint['model'])
@@ -384,24 +329,23 @@ if __name__ == '__main__':
         latest_update_epoch = checkpoint["latest_update_epoch"]
         print('exist {}! restart from {}'.format(tgt_model_name, start))
 
-    src_label_list = generate_cluster_label(args.src_datasets, src_trainpath)
-    src_hour_list, src_hour_rep_list = load_source_domain_representation(src_label_list, src_model_name)
-    tgt_label_list = generate_cluster_label(args.tgt_datasets, tgt_trainpath)
-    tgt_hour_list, tgt_hour_rep_list = generate_representation(model, train_dataset, tgt_label_list)
-    loss_func = TransferMeanLoss(gamma=float(args.gamma))
-    loss_func.update_src_representation(src_hour_list, src_hour_rep_list)
-    loss_func.update_tgt_representation(tgt_hour_list, tgt_hour_rep_list)
+    src_rep = load_source_domain_representation(src_model_name)
+    tgt_rep = generate_representation(model, train_dataset)
+    loss_func = TransferCoralLoss(gamma=float(args.gamma))
+    loss_func.update_src_representation(src_rep)
+    loss_func.update_tgt_representation(tgt_rep)
 
     if args.mode == 'train':
         for epoch in range(start, int(args.maxepoch)):
             loss_func.calculate_match_loss()
+            # loss_func.calculate_da_loss()
             train(model, train_loader, optimizer, epoch, loss_func=loss_func)
             val_loss = eval(model, eval_loader, optimizer, epoch, loss_func=loss_func, model_name=tgt_model_name)
 
-            src_hour_list, src_hour_rep_list = generate_representation(model, src_dataset, src_label_list)
-            loss_func.update_src_representation(src_hour_list, src_hour_rep_list)
-            tgt_hour_list, tgt_hour_rep_list = generate_representation(model, train_dataset, tgt_label_list)
-            loss_func.update_tgt_representation(tgt_hour_list, tgt_hour_rep_list)
+            src_rep = generate_representation(model, src_dataset)
+            tgt_sorted_rep = generate_representation(model, train_dataset)
+            loss_func.update_src_representation(src_rep)
+            loss_func.update_tgt_representation(tgt_rep)
 
             early_stopping(val_loss, model, optimizer)
             if early_stopping.early_stop:
