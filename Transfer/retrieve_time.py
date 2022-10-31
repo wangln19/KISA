@@ -4,7 +4,7 @@ import pandas as pd
 from tqdm import tqdm
 import pickle
 
-datafile = "E:\\数据集\\蚂蚁数据\\data\\HK迁移学习数据输出02.csv"
+datafile = "E:\Transfer_Learning\Data\Raw_data\data_with_time_stamp/LZD迁移学习数据输出02.csv"
 
 df = pd.read_csv(datafile, encoding='utf-8', sep=',', engine='python', error_bad_lines=False)
 

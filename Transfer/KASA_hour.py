@@ -17,10 +17,11 @@ import matplotlib.pyplot as plt
 from scipy.spatial.distance import pdist, squareform
 import math
 from Earlystopping import EarlyStopping
-from Loss import coral_loss
+from Loss import MMD_Loss
 from Dataset import EncodedDataset
 from Model import LSTMClassifier
 import time
+import random
 
 
 class TransferMeanLoss(nn.Module):
@@ -44,6 +45,34 @@ class TransferMeanLoss(nn.Module):
         # self.tgt_rep_0 = tgt_rep_0
         # self.tgt_rep_1 = tgt_rep_1
 
+    def select_representation(self, num, rep):
+        count = 0
+        src_hour_rep = rep
+        while True:
+            indices = random.sample(range(src_hour_rep.shape[0]), num)
+            slt_src_hour_rep = src_hour_rep[indices]
+            selected_centroid = slt_src_hour_rep.mean(axis=0)
+            ori_centroid = src_hour_rep.mean(axis=0)
+            dist = F.pairwise_distance(ori_centroid.reshape(1, self.rep_hidden_states), 
+                                       selected_centroid.reshape(1, self.rep_hidden_states), p=2)
+            dist = float(dist)
+            # set select bar = 0.5
+            if dist < 0.5 or num < 30:
+                break
+            else:
+                count += 1
+                if count > 50:
+                    raise RuntimeError("Select Centroid Bar is too Strict.")
+        return slt_src_hour_rep
+    
+    def mmd_loss(self, rep1, rep2):
+        if rep1.shape[0] > rep2.shape[0]:
+            rep1 = self.select_representation(rep2.shape[0], rep1)
+        else:
+            rep2 = self.select_representation(rep1.shape[0], rep2)
+        loss = MMD_Loss(rep1.cpu().numpy(), rep2.cpu().numpy())
+        return loss
+
     def calc_representation_distance(self):
         dists = []
         for _ in range(self.tgt_num_space):
@@ -65,7 +94,7 @@ class TransferMeanLoss(nn.Module):
                     tgt_hour_rep_centroid1 = torch.from_numpy(self.tgt_hour_rep_list[_][1]).cuda()
                 else:
                     tgt_hour_rep_centroid1 = self.tgt_hour_rep_list[_][1]
-                dis = coral_loss(src_hour_rep_centroid0, tgt_hour_rep_centroid0) + coral_loss(src_hour_rep_centroid1, tgt_hour_rep_centroid1) 
+                dis = self.mmd_loss(src_hour_rep_centroid0, tgt_hour_rep_centroid0) + self.mmd_loss(src_hour_rep_centroid1, tgt_hour_rep_centroid1) 
                 dist.append(float(dis))
             dists.append(dist)
         distance_st = np.array(dists)  # (self.tgt_num_space, self.src_num_spaces)
@@ -137,7 +166,7 @@ class TransferMeanLoss(nn.Module):
         # denominator_ss = torch.mul(torch.from_numpy(dist_matrix_ss), torch.from_numpy(weight_matrix_ss)).sum().sum()
         # denominator = denominator_st + denominator_tt + denominator_ss
         denominator = denominator_st
-        match_loss = np.log(3 * numerator / denominator)
+        match_loss = numerator / denominator
         self.match_loss = match_loss
     
     def domain_distance(self, rep_1, rep_2):
@@ -593,11 +622,11 @@ if __name__ == '__main__':
             tgt_hour_rep_list = divide_representation(tgt_comp_rep, tgt_sorted_rep, tgt_sorted_label, num_of_cluster, num_of_compression=50)
             loss_func.update_src_representation(src_hour_list, src_hour_rep_list)
             loss_func.update_tgt_representation(tgt_hour_list, tgt_hour_rep_list)
-
-            early_stopping(val_loss, model, optimizer)
-            if early_stopping.early_stop:
-                print("Early stopping")
-                break
+            if epoch > 10:
+                early_stopping(val_loss, model, optimizer)
+                if early_stopping.early_stop:
+                    print("Early stopping")
+                    break
 
         checkpoint = torch.load(tgt_model_name)
         model.load_state_dict(checkpoint["model"])

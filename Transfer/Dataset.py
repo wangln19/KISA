@@ -6,6 +6,7 @@ from torch.utils.data import Dataset
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
+import pickle
 
 
 class EncodedDataset(Dataset):
@@ -52,6 +53,27 @@ class EncodedDataset(Dataset):
 
     def __getitem__(self, item):
         return self.data[item], self.label[item], self.length[item]
+
+
+class FusionDataset(Dataset):
+    def __init__(self, rep_name1, rep_name2):
+        super(FusionDataset, self).__init__()
+        self.rep1 = []
+        self.rep2 = []
+        self.label = []
+        with open(rep_name1, "rb") as fp:
+            data = pickle.load(fp)
+            self.rep1 = data["rep"]
+            self.label = np.array(data["label"])
+        with open(rep_name2, "rb") as fp:
+            data = pickle.load(fp)
+            self.rep2 = data["rep"]
+
+    def __len__(self):
+        return len(self.label)
+
+    def __getitem__(self, item):
+        return self.rep1[item], self.rep2[item], self.label[item]
 
 
 class EncodedDataset_lstm(Dataset):
