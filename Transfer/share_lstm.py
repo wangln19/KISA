@@ -20,6 +20,7 @@ import argparse
 import joblib
 import seaborn as sns
 import matplotlib.pyplot as plt
+from Dataset import EncodedDataset
 
 
 class EarlyStopping:
@@ -65,56 +66,10 @@ class EarlyStopping:
         if self.verbose:
             print(f'Validation loss decreased ({self.val_loss_min:.6f} --> {val_loss:.6f}).  Saving model ...')
         state = {'model': model.state_dict(), 'optimizer': optimizer.state_dict(), 'epoch': 0,
-                 "best_auc": 1, "best_spauc": 1, "latest_update_epoch": 0}
+                 "auc": 1, "best_spauc": 1, "latest_update_epoch": 0}
         # save the model with min val loss, so indexes like epoch, beat_auc... is meaningless
-        torch.save(state, self.model_name)  # self.model_name.replace('.pt', '_selected_by_val_loss.pt')
+        torch.save(state, self.model_name)  # .replace('.pt', '_selected_by_val_loss.pt')
         self.val_loss_min = val_loss
-
-
-class EncodedDataset(Dataset):
-    def __init__(self, datafile, cmp_datafile):
-        super(EncodedDataset, self).__init__()
-        self.data = []
-        self.label = []
-        self.length = []
-
-        global input_size
-        df = pd.read_csv(datafile, encoding='utf-8', sep=',', engine='python', error_bad_lines=False).drop(
-            ['apdid', 'routermac'], axis=1)
-        cmp_df = pd.read_csv(cmp_datafile, encoding='utf-8', sep=',', engine='python', error_bad_lines=False).drop(
-            ['apdid', 'routermac'], axis=1)
-        # Normalization
-        arr = np.array(df['event_amount'])
-        lef = np.mean(arr) - 3 * np.std(arr)
-        rgt = np.mean(arr) + 3 * np.std(arr)
-        lef = min(arr) if min(arr) > lef else lef
-        rgt = max(arr) if max(arr) < rgt else rgt
-        df['event_amount'] = df['event_amount'].apply(lambda x: rgt if x > rgt else x)
-        df['event_amount'] = df['event_amount'].apply(lambda x: lef if x < lef else x)
-        df['event_amount'] = df['event_amount'].apply(lambda x: (x - lef) / (rgt - lef))
-
-        df_col = list(df.columns)
-        cmp_df_col = list(cmp_df.columns)
-        drop_features = [_ for _ in df_col if _ not in cmp_df_col]
-        drop_features += ['rn', 'target_event_id', 'label']
-        df_group = df.groupby(['target_event_id'], sort=False)
-        input_size = df.shape[1] - len(drop_features)
-        print('input size ', input_size)
-        with tqdm(df_group, desc='loading data...') as loop:
-            for target_event_id, frame in loop:
-                if frame['rn'].iloc[0] != 1:
-                    continue
-                self.label.append(frame['label'].iloc[0])
-                frame.sort_values(['rn'], inplace=True, ascending=False)
-                x = frame.drop(drop_features, axis=1).to_numpy()
-                self.data.append(x)
-                self.length.append(len(x))
-
-    def __len__(self):
-        return len(self.label)
-
-    def __getitem__(self, item):
-        return self.data[item], self.label[item], self.length[item]
 
 
 def collate_fn(batch):
@@ -180,7 +135,6 @@ def train(model, train_loader, optimizer, epoch, loss_func_name='cross_entropy',
     with tqdm(enumerate(train_loader), desc=desc) as loop:
         for i, batch in loop:
             inputs, labels, lengths = batch
-            b_size = inputs.shape[1]
             model.zero_grad()
             rep, prob = model(inputs, lengths)
             logits = torch.argmax(prob, dim=-1)
@@ -191,6 +145,7 @@ def train(model, train_loader, optimizer, epoch, loss_func_name='cross_entropy',
 
             batch_accuracy = (logits == labels).float().sum().item()
             train_accuracy += batch_accuracy
+            b_size = inputs.shape[1]
             train_epoch_size += b_size
             train_loss += loss.item() * b_size
 
@@ -227,18 +182,18 @@ def eval(model, eval_loader, optimizer, epoch, loss_func_name='cross_entropy', d
                 batch_accuracy = (logits == labels).float().sum().item()
                 validation_accuracy += batch_accuracy
                 validation_epoch_size += 1
-                validation_loss += loss.item()
+                validation_loss += loss.item() 
                 loop.set_postfix(epoch=epoch, loss=validation_loss / validation_epoch_size,
                                  acc=validation_accuracy / validation_epoch_size)
 
     writer.add_scalar('loss/val_loss', np.mean(validation_loss), epoch)
 
-    global best_auc
+    global best_spauc
     global latest_update_epoch
     # print("label_list:",type(label_list[-1][0]),label_list[-1])
     # print("prob_list:",type(prob_list[-1][0]),prob_list[-1])
     auc = roc_auc_score(label_list, prob_list)
-    spauc = roc_auc_score(label_list, prob_list, max_fpr=0.01)
+    spauc = roc_auc_score(label_list, prob_list, max_fpr=0.1)
     print(f'Epoch {epoch}, Validation AUC: {auc}, Validation SPAUC: {spauc}')
     '''
     more details:
@@ -247,11 +202,11 @@ def eval(model, eval_loader, optimizer, epoch, loss_func_name='cross_entropy', d
         print(classification_report(label_list, logit_list, target_names=['0', '1']))
     '''
 
-    '''
-    if auc > best_auc:
-        best_auc = auc
+    model_name = model_name.replace('.pt', '_slt_by_spauc.pt')
+    if spauc > best_spauc:
+        best_spauc = spauc
         latest_update_epoch = epoch
-        state = {'model': model.state_dict(), 'optimizer': optimizer.state_dict(), 'epoch': epoch, "best_auc": auc,
+        state = {'model': model.state_dict(), 'optimizer': optimizer.state_dict(), 'epoch': epoch, "auc": auc,
                  "best_spauc": spauc, "latest_update_epoch": latest_update_epoch}
         torch.save(state, model_name)
         print("Updating model... best auc is {}, best spauc is:{}".format(auc, spauc))
@@ -262,11 +217,11 @@ def eval(model, eval_loader, optimizer, epoch, loss_func_name='cross_entropy', d
         # update epoch
         checkpoint = torch.load(model_name)
         state = {'model': checkpoint["model"], 'optimizer': checkpoint["optimizer"], 'epoch': epoch,
-                 "best_auc": checkpoint["best_auc"], "best_spauc": checkpoint["best_spauc"],
+                 "auc": checkpoint["auc"], "best_spauc": checkpoint["best_spauc"],
                  "latest_update_epoch": latest_update_epoch}
         torch.save(state, model_name)
-        print("Updating epoch... auc is {}, best spauc is:{}".format(checkpoint["best_auc"], checkpoint["best_spauc"]))
-    '''
+        print("Updating epoch... auc is {}, best spauc is:{}".format(checkpoint["auc"], checkpoint["best_spauc"]))
+
     return validation_loss
 
 
@@ -301,7 +256,7 @@ def eval_wo_update(model, loader, loss_func_name='cross_entropy', desc='Validati
                 batch_accuracy = (logits == labels).float().sum().item()
                 validation_accuracy += batch_accuracy
                 validation_epoch_size += 1
-                validation_loss += loss.item()
+                validation_loss += loss.item() 
                 loop.set_postfix(loss=validation_loss / validation_epoch_size,
                                  acc=validation_accuracy / validation_epoch_size)
 
@@ -315,7 +270,7 @@ def eval_wo_update(model, loader, loss_func_name='cross_entropy', desc='Validati
             pickle.dump({"label": label_list, "rep": rep_list}, fp)
 
     auc = roc_auc_score(label_list, prob_list)
-    spauc = roc_auc_score(label_list, prob_list, max_fpr=0.01)
+    spauc = roc_auc_score(label_list, prob_list, max_fpr=0.1)
     precision, recall, thresholds = precision_recall_curve(label_list, prob_list)
     sns.set()
     plt.plot(recall, precision)
@@ -323,8 +278,17 @@ def eval_wo_update(model, loader, loss_func_name='cross_entropy', desc='Validati
     plt.ylabel('Precision')
     plt.show()
     print(f'min Threshold: {thresholds[0]}, max Threshold: {thresholds[-1]}')
-    print(f'AUC: {auc}, SPAUC: {spauc}')
+    from sklearn.metrics import average_precision_score, f1_score
+    auprc = average_precision_score(label_list, prob_list)
+    # F1_score = f1_score(label_list, prob_list, average='micro')
+    print(f'AUC: {auc}, SPAUC: {spauc}, AUPRC: {auprc}')
     print(classification_report(label_list, logit_list, target_names=['0', '1']))
+    tmp = []
+    for _ in range(len(precision)):
+        if 0.895 <= precision[_] <= 0.905:
+            tmp.append(recall[_])
+    if len(tmp):
+        print('r@p at 0.9', sorted(list(tmp))[-1])
 
 
 input_size = None
@@ -333,22 +297,23 @@ layer_num = 2
 batch_size = 32
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-best_auc = 0
+best_spauc = 0
 latest_update_epoch = 0
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--mode', default='generate')  # validate
-    parser.add_argument('--src_root', default='E:\Transfer_Learning\Data\LZD\csv')
-    parser.add_argument('--tgt_root', default='E:\Transfer_Learning\Data\HK\csv')
-    parser.add_argument('--filepath', default='train_2020-02.csv')
-    parser.add_argument('--lr', default=0.001, type=float)  # 0.001 for LZD
+    parser.add_argument('--mode', default='validate')  # validate
+    parser.add_argument('--src_root', default='../Data/LZD')
+    parser.add_argument('--tgt_root', default='../Data/HK')
+    parser.add_argument('--filepath', default='train_2020-01.csv')
+    parser.add_argument('--lr', default=0.0005, type=float)  # 0.001 for LZD
     parser.add_argument('--src_datasets', default='LZD')
     parser.add_argument('--tgt_datasets', default='HK')
     parser.add_argument('--maxepoch', default=2000, type=int)  # 200 for LZD
     parser.add_argument('--loss', default='cross_entropy')
-    parser.add_argument('--finetune', default=False)
-    parser.add_argument('--mark', default="finetune", type=str)
+    parser.add_argument('--finetune', default=True)
+    parser.add_argument('--direct', default=False)
+    parser.add_argument('--mark', default="lstm0", type=str)
     args = parser.parse_args()
 
     src_trainpath = os.path.join(args.src_root, args.filepath)
@@ -439,10 +404,9 @@ if __name__ == '__main__':
     test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False, collate_fn=collate_fn)
 
     model = LSTMClassifier(input_size, hidden_size, layer_num, args.finetune).to(device)
-    optimizer = optim.Adagrad(model.parameters(), lr=float(args.lr), lr_decay=0, weight_decay=0,
-                              initial_accumulator_value=0)
+    optimizer = optim.Adam(model.parameters(), lr=float(args.lr), weight_decay=0)
     start = 0
-    patience = 20
+    patience = 50
     if not args.finetune:
         early_stopping = EarlyStopping(patience, verbose=False, model_name=src_model_name)
     else:
@@ -454,46 +418,50 @@ if __name__ == '__main__':
             model.load_state_dict(checkpoint['model'])
             optimizer.load_state_dict(checkpoint['optimizer'])
             start = checkpoint['epoch'] + 1
-            best_auc = checkpoint["best_auc"]
+            best_spauc = checkpoint["best_spauc"]
             latest_update_epoch = checkpoint["latest_update_epoch"]
             print('exist{}! start from {}'.format(src_model_name, start))
-    else:
-
+    elif not args.direct:
+        src_model_name = 'LZD_2020-03_finetune.pt'
         if os.path.exists(src_model_name):
             checkpoint = torch.load(src_model_name)
             model.load_state_dict(checkpoint['model'])
-            best_auc = 0
+            best_spauc = 0
             print('exist{}! start finetune from {}'.format(src_model_name, start))
         else:
             raise FileNotFoundError("initial extractor model not found.")
-
+        
+        # tgt_model_name = 'HK_2020-01_finetune_selected_by_val_loss.pt'
         if os.path.exists(tgt_model_name):
             checkpoint = torch.load(tgt_model_name)
             model.load_state_dict(checkpoint['model'])
             optimizer.load_state_dict(checkpoint['optimizer'])
             start = checkpoint['epoch'] + 1
-            best_auc = checkpoint["best_auc"]
+            best_spauc = checkpoint["best_spauc"]
             latest_update_epoch = checkpoint["latest_update_epoch"]
-            print('exist{}! start from {}'.format(src_model_name, start))
-            # print(f'lr = {optimizer}')
+            print('exist{}! start from {}'.format(tgt_model_name, start))
 
     if args.mode == 'train':
         for epoch in range(start, int(args.maxepoch)):
             train(model, train_loader, optimizer, epoch, loss_func_name=args.loss)
             if not args.finetune:
                 val_loss = eval(model, eval_loader, optimizer, epoch, loss_func_name=args.loss, model_name=src_model_name)
+                early_stopping(val_loss, model, optimizer)
+                if early_stopping.early_stop:
+                    print("Early stopping")
+                    break
             else:
                 val_loss = eval(model, eval_loader, optimizer, epoch, loss_func_name=args.loss, model_name=tgt_model_name)
-            early_stopping(val_loss, model, optimizer)
-            if early_stopping.early_stop:
-                print("Early stopping")
-                break
+                early_stopping(val_loss, model, optimizer)
+                if early_stopping.early_stop:
+                    print("Early stopping")
+                    break
         if not args.finetune:
             checkpoint = torch.load(src_model_name)
         else:
             checkpoint = torch.load(tgt_model_name)
         model.load_state_dict(checkpoint["model"])
-        # print(f'latest update epoch: {latest_update_epoch}')
+        print(f'latest update epoch: {latest_update_epoch}')
         print("evaluating val set...")
         eval_wo_update(model, eval_loader, loss_func_name=args.loss)
         print("evaluating test set...")
@@ -501,7 +469,7 @@ if __name__ == '__main__':
 
     elif args.mode == 'validate':
         model.load_state_dict(checkpoint["model"])
-        # print(f'latest update epoch: {latest_update_epoch}')
+        print(f'latest update epoch: {latest_update_epoch}')
         print("evaluating val set...")
         eval_wo_update(model, eval_loader, loss_func_name=args.loss)
         print("evaluating test set...")

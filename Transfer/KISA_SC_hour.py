@@ -18,10 +18,11 @@ from scipy.spatial.distance import pdist, squareform
 import math
 from Earlystopping import EarlyStopping
 from Loss import MMD_Loss
-from Dataset import EncodedDataset
-from Model import LSTMClassifier
+from Dataset import ShortCut_EncodedDataset
+from Model import ShortCut_LSTMClassifier
 import time
 import random
+from sklearn.metrics import average_precision_score, f1_score
 
 
 class TransferMeanLoss(nn.Module):
@@ -94,6 +95,14 @@ class TransferMeanLoss(nn.Module):
                     tgt_hour_rep_centroid1 = torch.from_numpy(self.tgt_hour_rep_list[_][1]).cuda()
                 else:
                     tgt_hour_rep_centroid1 = self.tgt_hour_rep_list[_][1]
+                if len(src_hour_rep_centroid0) > 500:
+                    src_hour_rep_centroid0 = self.select_representation(500, src_hour_rep_centroid0)
+                if len(src_hour_rep_centroid1) > 500:
+                    src_hour_rep_centroid1 = self.select_representation(500, src_hour_rep_centroid1)
+                if len(tgt_hour_rep_centroid0) > 500:
+                    tgt_hour_rep_centroid0 = self.select_representation(500, tgt_hour_rep_centroid0)
+                if len(tgt_hour_rep_centroid1) > 500:
+                    tgt_hour_rep_centroid1 = self.select_representation(500, tgt_hour_rep_centroid1)
                 dis = self.mmd_loss(src_hour_rep_centroid0, tgt_hour_rep_centroid0) + self.mmd_loss(src_hour_rep_centroid1, tgt_hour_rep_centroid1) 
                 dist.append(float(dis))
             dists.append(dist)
@@ -147,6 +156,7 @@ class TransferMeanLoss(nn.Module):
     def match_representation(self, top_k=1):
         # dist_matrix_st, dist_matrix_tt, dist_matrix_ss= self.calc_representation_distance()
         dist_matrix_st = self.calc_representation_distance()
+        dist_matrix_st[np.isnan(dist_matrix_st)] = 0
         numerator_matrix = np.zeros((self.tgt_num_space, self.src_num_space))
         denominator_matrix = np.ones((self.tgt_num_space, self.src_num_space))
         for _ in range(self.tgt_num_space):
@@ -225,8 +235,9 @@ def generate_representation(model, dataset, index):
     with torch.no_grad():
         with tqdm(enumerate(loader), desc="loading representation...") as loop:
             for i, batch in loop:
-                inputs, labels, lengths = batch
-                rep, _ = model(inputs, lengths)
+                inputs, labels, lengths, shortcut_var = batch
+                rep, _ = model(inputs, lengths, shortcut_var)
+                # print(rep.size())
                 for __ in rep:
                     rep_list.append(__)
                 for __ in labels.cpu().numpy():
@@ -282,7 +293,7 @@ def divide_representation(sorted_hour_rep, ori_rep, labels, num_of_cluster, num_
                 record_matrix[__, _] = sum_temp
                 division_record_matrix[__, _] = mark_temp
     t2 = time.time()
-    print('time cost', t2 - t1, 's')
+    # print('time cost', t2 - t1, 's')
     # print(record_matrix)
     # print(division_record_matrix)
     division_list = [0]
@@ -309,9 +320,9 @@ def divide_representation(sorted_hour_rep, ori_rep, labels, num_of_cluster, num_
 
 
 def collate_fn(batch):
-    inputs, labels, lengths = zip(*batch)
+    inputs, labels, lengths, shortcut_var = zip(*batch)
     inputs_pad = pad_sequence([torch.from_numpy(x) for x in inputs], padding_value=0)
-    return inputs_pad.float().to(device), torch.LongTensor(labels).to(device), torch.LongTensor(lengths).to(device)
+    return inputs_pad.float().to(device), torch.LongTensor(labels).to(device), torch.LongTensor(lengths).to(device), torch.from_numpy(np.array(shortcut_var)).to(device=device, dtype=torch.float)
 
 
 def train(model, train_loader, optimizer, epoch, loss_func=nn.CrossEntropyLoss, desc='Train'):
@@ -322,9 +333,9 @@ def train(model, train_loader, optimizer, epoch, loss_func=nn.CrossEntropyLoss, 
     model.train()
     with tqdm(enumerate(train_loader), desc=desc) as loop:
         for i, batch in loop:
-            inputs, labels, lengths = batch
+            inputs, labels, lengths, shortcut_var = batch
             model.zero_grad()
-            rep, prob = model(inputs, lengths)
+            rep, prob = model(inputs, lengths, shortcut_var)
             logits = torch.argmax(prob, dim=-1)
             loss = loss_func(prob, labels)
             # loss.backward(retain_graph=True)
@@ -357,8 +368,8 @@ def eval(model, eval_loader, optimizer, epoch, loss_func=nn.CrossEntropyLoss, de
     with torch.no_grad():
         with tqdm(enumerate(eval_loader), desc=desc) as loop:
             for i, batch in loop:
-                inputs, labels, lengths = batch
-                rep, output = model(inputs, lengths)
+                inputs, labels, lengths, shortcut_var = batch
+                rep, output = model(inputs, lengths, shortcut_var)
                 logits = torch.argmax(output, dim=-1)
 
                 loss = loss_func(output, labels)
@@ -380,12 +391,12 @@ def eval(model, eval_loader, optimizer, epoch, loss_func=nn.CrossEntropyLoss, de
     writer.add_scalar('loss/match_loss', np.mean(match_loss), epoch)
     # writer.add_scalar('loss/da_loss', np.mean(da_loss), epoch)
 
-    global best_auc
+    global best_spauc
     global latest_update_epoch
     # print("label_list:",type(label_list[-1][0]),label_list[-1])
     # print("prob_list:",type(prob_list[-1][0]),prob_list[-1])
     auc = roc_auc_score(label_list, prob_list)
-    spauc = roc_auc_score(label_list, prob_list, max_fpr=0.01)
+    spauc = roc_auc_score(label_list, prob_list, max_fpr=0.1)
     print(f'Epoch {epoch}, Validation AUC: {auc}, Validation SPAUC: {spauc}')
     '''
     more details:
@@ -394,11 +405,11 @@ def eval(model, eval_loader, optimizer, epoch, loss_func=nn.CrossEntropyLoss, de
         print(classification_report(label_list, logit_list, target_names=['0', '1']))
     '''
 
-    '''
-    if auc > best_auc:
-        best_auc = auc
+    model_name = model_name.replace('.pt', '_slt_by_spauc.pt')
+    if spauc > best_spauc:
+        best_spauc = spauc
         latest_update_epoch = epoch
-        state = {'model': model.state_dict(), 'optimizer': optimizer.state_dict(), 'epoch': epoch, "best_auc": auc,
+        state = {'model': model.state_dict(), 'optimizer': optimizer.state_dict(), 'epoch': epoch, "auc": auc,
                  "best_spauc": spauc, "latest_update_epoch": latest_update_epoch}
         torch.save(state, model_name)
         print("Updating model... best auc is {}, best spauc is:{}".format(auc, spauc))
@@ -409,15 +420,15 @@ def eval(model, eval_loader, optimizer, epoch, loss_func=nn.CrossEntropyLoss, de
         # update epoch
         checkpoint = torch.load(model_name)
         state = {'model': checkpoint["model"], 'optimizer': checkpoint["optimizer"], 'epoch': epoch,
-                 "best_auc": checkpoint["best_auc"], "best_spauc": checkpoint["best_spauc"],
+                 "auc": checkpoint["auc"], "best_spauc": checkpoint["best_spauc"],
                  "latest_update_epoch": latest_update_epoch}
         torch.save(state, model_name)
-        print("Updating epoch... auc is {}, best spauc is:{}".format(checkpoint["best_auc"], checkpoint["best_spauc"]))
-    '''
+        print("Updating epoch... auc is {}, best spauc is:{}".format(checkpoint["auc"], checkpoint["best_spauc"]))
+
     return np.mean(validation_loss)
 
 
-def eval_wo_update(model, loader, desc='Validation'):
+def eval_wo_update(model, loader, desc='Validation', save_rep=False):
     validation_accuracy = 0
     validation_epoch_size = 0
     label_list = []
@@ -430,8 +441,8 @@ def eval_wo_update(model, loader, desc='Validation'):
     with torch.no_grad():
         with tqdm(enumerate(loader), desc=desc) as loop:
             for i, batch in loop:
-                inputs, labels, lengths = batch
-                rep, output = model(inputs, lengths)
+                inputs, labels, lengths, shortcut_var = batch
+                rep, output = model(inputs, lengths, shortcut_var)
                 # print("rep",type(rep),rep.shape)
                 logits = torch.argmax(output, dim=-1)
 
@@ -446,16 +457,27 @@ def eval_wo_update(model, loader, desc='Validation'):
 
                 loop.set_postfix(acc=validation_accuracy / validation_epoch_size)
 
+    if save_rep:
+        rep_list = torch.stack(rep_list, axis=0).cpu().numpy().squeeze()
+        # print("rep_list",type(rep_list),rep_list.shape)
+        # print("model_name",model_name)
+         # print("label_list",len(label_list),label_list[0])
+        rep_name = tgt_model_name.replace(".pt", "_test_rep.pkl")
+        with open(rep_name, "wb") as fp:
+            pickle.dump({"label": label_list, "rep": rep_list}, fp)
+
     auc = roc_auc_score(label_list, prob_list)
-    spauc = roc_auc_score(label_list, prob_list, max_fpr=0.01)
+    spauc = roc_auc_score(label_list, prob_list, max_fpr=0.1)
     precision, recall, thresholds = precision_recall_curve(label_list, prob_list)
-    sns.set()
-    plt.plot(recall, precision)
-    plt.xlabel('Recall')
-    plt.ylabel('Precision')
-    plt.show()
+    # sns.set()
+    # plt.plot(recall, precision)
+    # plt.xlabel('Recall')
+    # plt.ylabel('Precision')
+    # plt.show()
     print(f'min Threshold: {thresholds[0]}, max Threshold: {thresholds[-1]}')
-    print(f'AUC: {auc}, SPAUC: {spauc}')
+    auprc = average_precision_score(label_list, prob_list)
+    # F1_score = f1_score(label_list, prob_list, average='micro')
+    print(f'AUC: {auc}, SPAUC: {spauc}, AUPRC: {auprc}')
     print(classification_report(label_list, logit_list, target_names=['0', '1']))
 
 
@@ -464,23 +486,23 @@ hidden_size = 300
 layer_num = 2
 batch_size = 32
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-best_auc = 0
+best_spauc = 0
 latest_update_epoch = 0
 num_of_compression = 2000
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--mode', default='train')  # validate
-    parser.add_argument('--src_root', default='../Data/LZD/csv')
-    parser.add_argument('--tgt_root', default='../Data/HK/csv')
-    parser.add_argument('--filepath', default='train_2020-01.csv')
+    parser.add_argument('--mode', default='generate')  # validate
+    parser.add_argument('--src_root', default='../Data/LZD')
+    parser.add_argument('--tgt_root', default='../Data/HK')
+    parser.add_argument('--filepath', default='train_2020-03.csv')
     parser.add_argument('--lr', default=0.0001, type=float)  # 0.001 for LZD
     parser.add_argument('--src_datasets', default='LZD')
     parser.add_argument('--tgt_datasets', default='HK')
     parser.add_argument('--maxepoch', default=2000, type=int)  # 200 for LZD
     parser.add_argument('--loss', default='cross_entropy')
-    parser.add_argument('--mark', default="KASA_hour", type=str)
+    parser.add_argument('--mark', default="KISA_SC_hour", type=str)
     parser.add_argument('--gamma', default=0.01, type=float) # 0.01
     parser.add_argument('--num_of_cluster', default=4, type=float)
     args = parser.parse_args()
@@ -522,7 +544,7 @@ if __name__ == '__main__':
         with open(tgt_trainOutputName, "rb") as fp:
             train_dataset = pickle.load(fp)
     else:
-        train_dataset = EncodedDataset(tgt_trainpath, src_trainpath)
+        train_dataset = ShortCut_EncodedDataset(tgt_trainpath, src_trainpath)
         with open(tgt_trainOutputName, "wb") as fp:
             pickle.dump(train_dataset, fp)
     # loading tgt val set
@@ -530,7 +552,7 @@ if __name__ == '__main__':
         with open(tgt_evalOutputName, "rb") as fp:
             val_dataset = pickle.load(fp)
     else:
-        val_dataset = EncodedDataset(tgt_evalpath, src_evalpath)
+        val_dataset = ShortCut_EncodedDataset(tgt_evalpath, src_evalpath)
         with open(tgt_evalOutputName, "wb") as fp:
             pickle.dump(val_dataset, fp)
     # loading test set
@@ -538,7 +560,7 @@ if __name__ == '__main__':
         with open(tgt_testOutputName, "rb") as fp:
             test_dataset = pickle.load(fp)
     else:
-        test_dataset = EncodedDataset(tgt_testpath, src_testpath)
+        test_dataset = ShortCut_EncodedDataset(tgt_testpath, src_testpath)
         with open(tgt_testOutputName, "wb") as fp:
             pickle.dump(test_dataset, fp)
     # loading src set
@@ -546,7 +568,7 @@ if __name__ == '__main__':
         with open(src_trainOutputName, "rb") as fp:
             src_dataset = pickle.load(fp)
     else:
-        src_dataset = EncodedDataset(src_trainpath, tgt_trainpath)
+        src_dataset = ShortCut_EncodedDataset(src_trainpath, tgt_trainpath)
         with open(src_trainOutputName, "wb") as fp:
             pickle.dump(src_dataset, fp)
 
@@ -555,18 +577,17 @@ if __name__ == '__main__':
     eval_loader = DataLoader(val_dataset, batch_size=1, shuffle=False, collate_fn=collate_fn)
     test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False, collate_fn=collate_fn)
 
-    model = LSTMClassifier(input_size, hidden_size, layer_num).to(device)
-    optimizer = optim.Adagrad(model.parameters(), lr=float(args.lr), lr_decay=0, weight_decay=0,
-                              initial_accumulator_value=0)
+    model = ShortCut_LSTMClassifier(input_size, hidden_size, layer_num).to(device)
+    optimizer = optim.Adam(model.parameters(), lr=float(args.lr), weight_decay=0)
     num_of_cluster = args.num_of_cluster
     start = 0
-    patience = 20
+    patience = 50
     early_stopping = EarlyStopping(patience, verbose=False, model_name=tgt_model_name)
     len_of_src = 0
     len_of_tgt = 0
 
-    '''
-    if os.path.exists(src_model_name):
+    
+    '''if os.path.exists(src_model_name):
         src_checkpoint = torch.load(src_model_name)
         src_model = src_checkpoint['model']
         model_dict = model.state_dict()
@@ -575,15 +596,15 @@ if __name__ == '__main__':
         model.load_state_dict(model_dict)
         print('exist {}!'.format(src_model_name))
     else:
-        raise FileNotFoundError("initial source model not found.")
-    '''
+        raise FileNotFoundError("initial source model not found.")'''
+    
 
     if os.path.exists(tgt_model_name):
         checkpoint = torch.load(tgt_model_name)
         model.load_state_dict(checkpoint['model'])
         optimizer.load_state_dict(checkpoint['optimizer'])
         start = checkpoint['epoch'] + 1
-        best_auc = checkpoint["best_auc"]
+        best_spauc = checkpoint["best_spauc"]
         latest_update_epoch = checkpoint["latest_update_epoch"]
         print('exist {}! restart from {}'.format(tgt_model_name, start))
 
@@ -643,3 +664,27 @@ if __name__ == '__main__':
         eval_wo_update(model, eval_loader)
         print("evaluating test set...")
         eval_wo_update(model, test_loader)
+    
+    elif args.mode == 'generate':
+        model.load_state_dict(checkpoint["model"])
+        gen_loader = DataLoader(test_dataset, batch_size=1, shuffle=False, collate_fn=collate_fn)
+        print("generating representation...")
+        eval_wo_update(model, gen_loader, save_rep=True)
+    
+    elif args.mode == 'rep':
+        model.load_state_dict(checkpoint["model"])
+        loader = DataLoader(src_dataset, batch_size=32, shuffle=False, collate_fn=collate_fn)
+        label_list = []
+        rep_list = []
+        model.eval()
+        with torch.no_grad():
+            with tqdm(enumerate(loader), desc="loading representation...") as loop:
+                for i, batch in loop:
+                    inputs, labels, lengths = batch
+                    rep, _ = model(inputs, lengths)
+                    for _ in rep:
+                        rep_list.append(_.cpu().numpy())
+                    label_list.append(labels.cpu().numpy())
+        np.save("./rep/rep_list_data_hour.npy", np.array(rep_list))
+        np.save("./rep/label_list_data_hour.npy", np.array(label_list)) 
+

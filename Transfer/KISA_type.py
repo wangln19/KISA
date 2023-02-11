@@ -12,7 +12,7 @@ import pickle
 import os
 from tqdm import tqdm
 import argparse
-import seaborn as sns
+import seaborn as snsaverage_precision_score
 import matplotlib.pyplot as plt
 from sklearn.cluster import KMeans
 import math
@@ -22,6 +22,7 @@ from Dataset import EncodedDataset
 from Model import LSTMClassifier
 import re
 import random
+from sklearn.metrics import average_precision_score, f1_score
 
 
 class TransferMeanLoss(nn.Module):
@@ -94,6 +95,14 @@ class TransferMeanLoss(nn.Module):
                     tgt_hour_rep_centroid1 = torch.from_numpy(self.tgt_hour_rep_list[_][1]).cuda()
                 else:
                     tgt_hour_rep_centroid1 = self.tgt_hour_rep_list[_][1]
+                if len(src_hour_rep_centroid0) > 500:
+                    src_hour_rep_centroid0 = self.select_representation(500, src_hour_rep_centroid0)
+                if len(src_hour_rep_centroid1) > 500:
+                    src_hour_rep_centroid1 = self.select_representation(500, src_hour_rep_centroid1)
+                if len(tgt_hour_rep_centroid0) > 500:
+                    tgt_hour_rep_centroid0 = self.select_representation(500, tgt_hour_rep_centroid0)
+                if len(tgt_hour_rep_centroid1) > 500:
+                    tgt_hour_rep_centroid1 = self.select_representation(500, tgt_hour_rep_centroid1)
                 dis = self.mmd_loss(src_hour_rep_centroid0, tgt_hour_rep_centroid0) + self.mmd_loss(src_hour_rep_centroid1, tgt_hour_rep_centroid1) 
                 dist.append(float(dis))
             dists.append(dist)
@@ -253,12 +262,12 @@ def eval(model, eval_loader, optimizer, epoch, loss_func=nn.CrossEntropyLoss, de
     writer.add_scalar('loss/val_loss', np.mean(validation_loss), epoch)
     writer.add_scalar('loss/match_loss', np.mean(match_loss), epoch)
 
-    global best_auc
+    global best_spauc
     global latest_update_epoch
     # print("label_list:",type(label_list[-1][0]),label_list[-1])
     # print("prob_list:",type(prob_list[-1][0]),prob_list[-1])
     auc = roc_auc_score(label_list, prob_list)
-    spauc = roc_auc_score(label_list, prob_list, max_fpr=0.05)
+    spauc = roc_auc_score(label_list, prob_list, max_fpr=0.1)
     print(f'Epoch {epoch}, Validation AUC: {auc}, Validation SPAUC: {spauc}')
     '''
     more details:
@@ -267,11 +276,11 @@ def eval(model, eval_loader, optimizer, epoch, loss_func=nn.CrossEntropyLoss, de
         print(classification_report(label_list, logit_list, target_names=['0', '1']))
     '''
 
-    '''
-    if auc > best_auc:
-        best_auc = auc
+    model_name = model_name.replace('.pt', '_slt_by_spauc.pt')
+    if spauc > best_spauc:
+        best_spauc = spauc
         latest_update_epoch = epoch
-        state = {'model': model.state_dict(), 'optimizer': optimizer.state_dict(), 'epoch': epoch, "best_auc": auc,
+        state = {'model': model.state_dict(), 'optimizer': optimizer.state_dict(), 'epoch': epoch, "auc": auc,
                  "best_spauc": spauc, "latest_update_epoch": latest_update_epoch}
         torch.save(state, model_name)
         print("Updating model... best auc is {}, best spauc is:{}".format(auc, spauc))
@@ -282,11 +291,11 @@ def eval(model, eval_loader, optimizer, epoch, loss_func=nn.CrossEntropyLoss, de
         # update epoch
         checkpoint = torch.load(model_name)
         state = {'model': checkpoint["model"], 'optimizer': checkpoint["optimizer"], 'epoch': epoch,
-                 "best_auc": checkpoint["best_auc"], "best_spauc": checkpoint["best_spauc"],
+                 "auc": checkpoint["auc"], "best_spauc": checkpoint["best_spauc"],
                  "latest_update_epoch": latest_update_epoch}
         torch.save(state, model_name)
-        print("Updating epoch... auc is {}, best spauc is:{}".format(checkpoint["best_auc"], checkpoint["best_spauc"]))
-    '''
+        print("Updating epoch... auc is {}, best spauc is:{}".format(checkpoint["auc"], checkpoint["best_spauc"]))
+
     return np.mean(validation_loss)
 
 
@@ -329,16 +338,24 @@ def eval_wo_update(model, loader, desc='Validation', save_rep=False):
             pickle.dump({"label": label_list, "rep": rep_list}, fp)
 
     auc = roc_auc_score(label_list, prob_list)
-    spauc = roc_auc_score(label_list, prob_list, max_fpr=0.05)
+    spauc = roc_auc_score(label_list, prob_list, max_fpr=0.1)
     precision, recall, thresholds = precision_recall_curve(label_list, prob_list)
-    sns.set()
+    '''sns.set()
     plt.plot(recall, precision)
     plt.xlabel('Recall')
     plt.ylabel('Precision')
-    plt.show()
+    plt.show()'''
     print(f'min Threshold: {thresholds[0]}, max Threshold: {thresholds[-1]}')
-    print(f'AUC: {auc}, SPAUC: {spauc}')
+    auprc = average_precision_score(label_list, prob_list)
+    # F1_score = f1_score(label_list, prob_list, average='micro')
+    print(f'AUC: {auc}, SPAUC: {spauc}, AUPRC: {auprc}')
     print(classification_report(label_list, logit_list, target_names=['0', '1']))
+    tmp = []
+    for _ in range(len(precision)):
+        if 0.895 <= precision[_] <= 0.905:
+            tmp.append(recall[_])
+    if len(tmp):
+        print('r@p at 0.9', sorted(list(tmp))[-1])
 
 
 def generate_cluster_label(datasets, datafile):
@@ -416,22 +433,22 @@ hidden_size = 300
 layer_num = 2
 batch_size = 32
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-best_auc = 0
+best_spauc = 0
 latest_update_epoch = 0
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--mode', default='train')  # validate
-    parser.add_argument('--src_root', default='../Data/LZD/csv')
-    parser.add_argument('--tgt_root', default='../Data/HK/csv')
+    parser.add_argument('--mode', default='rep')  # validate
+    parser.add_argument('--src_root', default='../Data/LZD')
+    parser.add_argument('--tgt_root', default='../Data/HK')
     parser.add_argument('--filepath', default='train_2020-01.csv')
     parser.add_argument('--lr', default=0.0001, type=float)  # 0.001 for LZD
     parser.add_argument('--src_datasets', default='LZD')
     parser.add_argument('--tgt_datasets', default='HK')
     parser.add_argument('--maxepoch', default=2000, type=int)  # 200 for LZD
     parser.add_argument('--loss', default='cross_entropy')
-    parser.add_argument('--mark', default="KISA_type", type=str)
+    parser.add_argument('--mark', default="KISA_type0", type=str)
     parser.add_argument('--gamma', default=0.01, type=float)  # 0.01
     args = parser.parse_args()
 
@@ -506,10 +523,9 @@ if __name__ == '__main__':
     test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False, collate_fn=collate_fn)
 
     model = LSTMClassifier(input_size, hidden_size, layer_num).to(device)
-    optimizer = optim.Adagrad(model.parameters(), lr=float(args.lr), lr_decay=0, weight_decay=0,
-                              initial_accumulator_value=0)
+    optimizer = optim.Adam(model.parameters(), lr=float(args.lr), weight_decay=0)
     start = 0
-    patience = 20
+    patience = 50
     early_stopping = EarlyStopping(patience, verbose=False, model_name=tgt_model_name)
     len_of_src = 0
     len_of_tgt = 0
@@ -532,7 +548,7 @@ if __name__ == '__main__':
         model.load_state_dict(checkpoint['model'])
         optimizer.load_state_dict(checkpoint['optimizer'])
         start = checkpoint['epoch'] + 1
-        best_auc = checkpoint["best_auc"]
+        best_spauc = checkpoint["best_spauc"]
         latest_update_epoch = checkpoint["latest_update_epoch"]
         print('exist {}! restart from {}'.format(tgt_model_name, start))
 
@@ -585,3 +601,21 @@ if __name__ == '__main__':
         gen_loader = DataLoader(test_dataset, batch_size=1, shuffle=False, collate_fn=collate_fn)
         print("generating representation...")
         eval_wo_update(model, gen_loader, save_rep=True)
+
+    elif args.mode == 'rep':
+        model.load_state_dict(checkpoint["model"])
+        loader = DataLoader(src_dataset, batch_size=32, shuffle=False, collate_fn=collate_fn)
+        label_list = []
+        rep_list = []
+        model.eval()
+        with torch.no_grad():
+            with tqdm(enumerate(loader), desc="loading representation...") as loop:
+                for i, batch in loop:
+                    inputs, labels, lengths = batch
+                    rep, _ = model(inputs, lengths)
+                    for _ in rep:
+                        rep_list.append(_.cpu().numpy())
+                    label_list.append(labels.cpu().numpy())
+        np.save("./rep/rep_list_data_type.npy", np.array(rep_list))
+        np.save("./rep/label_list_data_type.npy", np.array(label_list)) 
+

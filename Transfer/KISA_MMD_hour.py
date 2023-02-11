@@ -106,8 +106,7 @@ class TransferMeanLoss(nn.Module):
                 dis = self.mmd_loss(src_hour_rep_centroid0, tgt_hour_rep_centroid0) + self.mmd_loss(src_hour_rep_centroid1, tgt_hour_rep_centroid1) 
                 dist.append(float(dis))
             dists.append(dist)
-        distance_st = np.array(dists)  # (self.tgt_num_space, self.src_num_spaces
-        
+        distance_st = np.array(dists)  # (self.tgt_num_space, self.src_num_spaces)
         '''
         distance_tt = np.zeros((self.tgt_num_space, self.tgt_num_space))
         for _ in range(self.tgt_num_space):
@@ -158,7 +157,6 @@ class TransferMeanLoss(nn.Module):
         # dist_matrix_st, dist_matrix_tt, dist_matrix_ss= self.calc_representation_distance()
         dist_matrix_st = self.calc_representation_distance()
         dist_matrix_st[np.isnan(dist_matrix_st)] = 0
-        
         numerator_matrix = np.zeros((self.tgt_num_space, self.src_num_space))
         denominator_matrix = np.ones((self.tgt_num_space, self.src_num_space))
         for _ in range(self.tgt_num_space):
@@ -170,16 +168,9 @@ class TransferMeanLoss(nn.Module):
                     denominator_matrix[_, __] = 0
         # weight_matrix_st, weight_matrix_tt, weight_matrix_ss = self.calculate_weight_matrix()
         weight_matrix_st = self.calculate_weight_matrix()
-        
         numerator_matrix = np.multiply(numerator_matrix, weight_matrix_st)
-        denominator_matrix_st = np.multiply(denominator_matrix, weight_matrix_st)
         numerator = torch.mul(torch.from_numpy(dist_matrix_st), torch.from_numpy(numerator_matrix)).sum().sum()
-        denominator_st = torch.mul(torch.from_numpy(dist_matrix_st), torch.from_numpy(denominator_matrix_st)).sum().sum()
-        # denominator_tt = torch.mul(torch.from_numpy(dist_matrix_tt), torch.from_numpy(weight_matrix_tt)).sum().sum()
-        # denominator_ss = torch.mul(torch.from_numpy(dist_matrix_ss), torch.from_numpy(weight_matrix_ss)).sum().sum()
-        # denominator = denominator_st + denominator_tt + denominator_ss
-        denominator = denominator_st
-        match_loss = numerator / denominator if denominator != 0 else numerator
+        match_loss = numerator 
         self.match_loss = match_loss
     
     def domain_distance(self, rep_1, rep_2):
@@ -471,15 +462,16 @@ def eval_wo_update(model, loader, desc='Validation', save_rep=False):
     auc = roc_auc_score(label_list, prob_list)
     spauc = roc_auc_score(label_list, prob_list, max_fpr=0.1)
     precision, recall, thresholds = precision_recall_curve(label_list, prob_list)
-    # sns.set()
-    # plt.plot(recall, precision)
-    # plt.xlabel('Recall')
-    # plt.ylabel('Precision')
-    # plt.show()
+    sns.set()
+    plt.plot(recall, precision)
+    plt.xlabel('Recall')
+    plt.ylabel('Precision')
+    plt.show()
     print(f'min Threshold: {thresholds[0]}, max Threshold: {thresholds[-1]}')
     auprc = average_precision_score(label_list, prob_list)
     # F1_score = f1_score(label_list, prob_list, average='micro')
     print(f'AUC: {auc}, SPAUC: {spauc}, AUPRC: {auprc}')
+    
     print(classification_report(label_list, logit_list, target_names=['0', '1']))
 
 
@@ -495,18 +487,18 @@ num_of_compression = 2000
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--mode', default='generate')  # validate
+    parser.add_argument('--mode', default='validate')  # validate
     parser.add_argument('--src_root', default='../Data/LZD')
     parser.add_argument('--tgt_root', default='../Data/HK')
-    parser.add_argument('--filepath', default='train_2020-03.csv')
+    parser.add_argument('--filepath', default='train_2020-01.csv')
     parser.add_argument('--lr', default=0.0001, type=float)  # 0.001 for LZD
     parser.add_argument('--src_datasets', default='LZD')
     parser.add_argument('--tgt_datasets', default='HK')
     parser.add_argument('--maxepoch', default=2000, type=int)  # 200 for LZD
     parser.add_argument('--loss', default='cross_entropy')
-    parser.add_argument('--mark', default="KISA_hour2", type=str)
+    parser.add_argument('--mark', default="KISA_MMD_hour2", type=str)
     parser.add_argument('--gamma', default=0.01, type=float) # 0.01
-    parser.add_argument('--num_of_cluster', default=4, type=int)
+    parser.add_argument('--num_of_cluster', default=4, type=float)
     args = parser.parse_args()
 
     src_trainpath = os.path.join(args.src_root, args.filepath)
@@ -672,22 +664,3 @@ if __name__ == '__main__':
         gen_loader = DataLoader(test_dataset, batch_size=1, shuffle=False, collate_fn=collate_fn)
         print("generating representation...")
         eval_wo_update(model, gen_loader, save_rep=True)
-    
-    elif args.mode == 'rep':
-        model.load_state_dict(checkpoint["model"])
-        loader = DataLoader(src_dataset, batch_size=32, shuffle=False, collate_fn=collate_fn)
-        label_list = []
-        rep_list = []
-        model.eval()
-        with torch.no_grad():
-            with tqdm(enumerate(loader), desc="loading representation...") as loop:
-                for i, batch in loop:
-                    inputs, labels, lengths = batch
-                    rep, _ = model(inputs, lengths)
-                    for _ in rep:
-                        rep_list.append(_.cpu().numpy())
-                    label_list.append(labels.cpu().numpy())
-        np.save("./rep/rep_list_data_hour.npy", np.array(rep_list))
-        np.save("./rep/label_list_data_hour.npy", np.array(label_list)) 
-
-

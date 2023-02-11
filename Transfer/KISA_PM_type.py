@@ -14,81 +14,181 @@ from tqdm import tqdm
 import argparse
 import seaborn as sns
 import matplotlib.pyplot as plt
-from scipy.spatial.distance import pdist, squareform
+from sklearn.cluster import KMeans
 import math
 from Earlystopping import EarlyStopping
+from Loss import MMD_Loss
 from Dataset import EncodedDataset
 from Model import LSTMClassifier
-import time
+import re
+import random
+from sklearn.metrics import average_precision_score, f1_score
 
 
-class DomainAdaptionLoss(nn.Module):
-    def __init__(self, src_rep_0, src_rep_1, lamda=0.5):
-        super(DomainAdaptionLoss, self).__init__()
-        # print("src_rep_0.mean(axis=0)",src_rep_0.mean(axis=0))
-        self.src_rep_0 = torch.from_numpy(src_rep_0).cuda(device).reshape((1, -1))
-        self.src_rep_1 = torch.from_numpy(src_rep_1).cuda(device).reshape((1, -1))
-        self.lamda = lamda  # trade-off parameters
-        # print("lamda", self.lamda)
+class TransferMeanLoss(nn.Module):
+    def __init__(self, gamma=0.5, da_gamma=1):
+        super(TransferMeanLoss, self).__init__()
+        self.gamma = gamma  # trade-off parameters
+        self.da_gamma = da_gamma
+        # print("gamma", self.gamma)
         self.cls = nn.CrossEntropyLoss(weight=torch.Tensor([0.1, 0.8]).to(device))
 
+    def update_src_representation(self, src_hour_list, src_hour_rep_list):  # src_rep_0, src_rep_1
+        self.src_num_space = len(src_hour_list)
+        self.rep_hidden_states = src_hour_rep_list[0][0].shape[1]
+        self.src_hour_rep_list = src_hour_rep_list
+        # self.src_rep_0 = src_rep_0
+        # self.src_rep_1 = src_rep_1
+
+    def update_tgt_representation(self, tgt_hour_list, tgt_hour_rep_list):  # tgt_rep_0, tgt_rep_1
+        self.tgt_num_space = len(tgt_hour_list)
+        self.tgt_hour_rep_list = tgt_hour_rep_list
+        # self.tgt_rep_0 = tgt_rep_0
+        # self.tgt_rep_1 = tgt_rep_1
+    
+    def select_representation(self, num, rep):
+        count = 0
+        src_hour_rep = rep
+        while True:
+            indices = random.sample(range(src_hour_rep.shape[0]), num)
+            slt_src_hour_rep = src_hour_rep[indices]
+            selected_centroid = slt_src_hour_rep.mean(axis=0)
+            ori_centroid = src_hour_rep.mean(axis=0)
+            dist = F.pairwise_distance(ori_centroid.reshape(1, self.rep_hidden_states), 
+                                       selected_centroid.reshape(1, self.rep_hidden_states), p=2)
+            dist = float(dist)
+            # set select bar = 0.5
+            if dist < 0.5 or num < 30:
+                break
+            else:
+                count += 1
+                if count > 50:
+                    raise RuntimeError("Select Centroid Bar is too Strict.")
+        return slt_src_hour_rep
+    
+    def mmd_loss(self, rep1, rep2):
+        if rep1.shape[0] > rep2.shape[0]:
+            rep1 = self.select_representation(rep2.shape[0], rep1)
+        else:
+            rep2 = self.select_representation(rep1.shape[0], rep2)
+        loss = MMD_Loss(rep1.cpu().numpy(), rep2.cpu().numpy())
+        return loss
+
+    def calc_representation_distance(self):
+        dists = []
+        for _ in range(self.tgt_num_space):
+            dist = []
+            for __ in range(self.src_num_space):
+                if isinstance(self.src_hour_rep_list[__][0], np.ndarray):
+                    src_hour_rep_centroid0 = torch.from_numpy(self.src_hour_rep_list[__][0]).cuda()
+                else:
+                    src_hour_rep_centroid0 = self.src_hour_rep_list[__][0]
+                if isinstance(self.src_hour_rep_list[__][1], np.ndarray):
+                    src_hour_rep_centroid1 = torch.from_numpy(self.src_hour_rep_list[__][1]).cuda()
+                else:
+                    src_hour_rep_centroid1 = self.src_hour_rep_list[__][1]
+                if isinstance(self.tgt_hour_rep_list[_][0], np.ndarray):
+                    tgt_hour_rep_centroid0 = torch.from_numpy(self.tgt_hour_rep_list[_][0]).cuda()
+                else:
+                    tgt_hour_rep_centroid0 = self.tgt_hour_rep_list[_][0]
+                if isinstance(self.tgt_hour_rep_list[_][1], np.ndarray):
+                    tgt_hour_rep_centroid1 = torch.from_numpy(self.tgt_hour_rep_list[_][1]).cuda()
+                else:
+                    tgt_hour_rep_centroid1 = self.tgt_hour_rep_list[_][1]
+                if len(src_hour_rep_centroid0) > 500:
+                    src_hour_rep_centroid0 = self.select_representation(500, src_hour_rep_centroid0)
+                if len(src_hour_rep_centroid1) > 500:
+                    src_hour_rep_centroid1 = self.select_representation(500, src_hour_rep_centroid1)
+                if len(tgt_hour_rep_centroid0) > 500:
+                    tgt_hour_rep_centroid0 = self.select_representation(500, tgt_hour_rep_centroid0)
+                if len(tgt_hour_rep_centroid1) > 500:
+                    tgt_hour_rep_centroid1 = self.select_representation(500, tgt_hour_rep_centroid1)
+                dis = self.mmd_loss(src_hour_rep_centroid0, tgt_hour_rep_centroid0) + self.mmd_loss(src_hour_rep_centroid1, tgt_hour_rep_centroid1) 
+                dist.append(float(dis))
+            dists.append(dist)
+        distance_st = np.array(dists)  # (self.tgt_num_space, self.src_num_spaces)
+        '''
+        distance_tt = np.zeros((self.tgt_num_space, self.tgt_num_space))
+        for _ in range(self.tgt_num_space):
+            for __ in range(_+1, self.tgt_num_space):
+                if isinstance(self.tgt_hour_rep_list[__], np.ndarray):
+                    tgt_hour_rep_centroid1 = torch.from_numpy(self.tgt_hour_rep_list[__]).cuda()
+                else:
+                    tgt_hour_rep_centroid1 = self.tgt_hour_rep_list[__]
+                if isinstance(self.tgt_hour_rep_list[_], np.ndarray):
+                    tgt_hour_rep_centroid2 = torch.from_numpy(self.tgt_hour_rep_list[_]).cuda()
+                else:
+                    tgt_hour_rep_centroid2 = self.tgt_hour_rep_list[_]
+                distance_tt[_, __] = coral_loss(tgt_hour_rep_centroid1, tgt_hour_rep_centroid2) 
+
+        distance_ss = np.zeros((self.src_num_space, self.src_num_space))
+        for _ in range(self.src_num_space):    
+            for __ in range(_+1, self.src_num_space):
+                if isinstance(self.src_hour_rep_list[__], np.ndarray):
+                    src_hour_rep_centroid1 = torch.from_numpy(self.src_hour_rep_list[__]).cuda()
+                else:
+                    src_hour_rep_centroid1 = self.src_hour_rep_list[__]
+                if isinstance(self.src_hour_rep_list[_], np.ndarray):
+                    src_hour_rep_centroid2 = torch.from_numpy(self.src_hour_rep_list[_]).cuda()
+                else:
+                    src_hour_rep_centroid2 = self.src_hour_rep_list[_]
+                distance_ss[_, __] = coral_loss(src_hour_rep_centroid1, src_hour_rep_centroid2)
+        '''
+        return distance_st
+
+    def calculate_weight_matrix(self):
+        weight_matrix1 = np.ones((self.tgt_num_space, self.src_num_space))
+        for _ in range(self.tgt_num_space):
+            for __ in range(self.src_num_space):
+                weight_matrix1[_, __] = (len(self.src_hour_rep_list[__][0]) + len(self.src_hour_rep_list[__][1])) * (len(self.tgt_hour_rep_list[_][0]) + len(self.tgt_hour_rep_list[_][1])) / len_of_src /len_of_tgt
+        '''
+        weight_matrix2 = np.zeros((self.tgt_num_space, self.tgt_num_space))
+        weight_matrix3 = np.zeros((self.src_num_space, self.src_num_space))
+        for _ in range(self.tgt_num_space):
+            for __ in range(_+1, self.tgt_num_space):
+                weight_matrix2[_, __] = len(self.tgt_hour_rep_list[__]) * len(self.tgt_hour_rep_list[_]) / len_of_tgt /len_of_tgt
+        for _ in range(self.src_num_space):
+            for __ in range(_+1, self.src_num_space):
+                weight_matrix3[_, __] = len(self.src_hour_rep_list[__]) * len(self.src_hour_rep_list[_]) / len_of_src /len_of_src
+        '''
+        return weight_matrix1
+
+    def match_representation(self, top_k=1):
+        # dist_matrix_st, dist_matrix_tt, dist_matrix_ss= self.calc_representation_distance()
+        dist_matrix_st = self.calc_representation_distance()
+        numerator_matrix = np.zeros((self.tgt_num_space, self.src_num_space))
+        denominator_matrix = np.ones((self.tgt_num_space, self.src_num_space))
+        for _ in range(self.tgt_num_space):
+            for __ in range(self.src_num_space):
+                if _ == __:
+                    numerator_matrix[_, __] = 1
+                    denominator_matrix[_, __] = 0
+        # weight_matrix_st, weight_matrix_tt, weight_matrix_ss = self.calculate_weight_matrix()
+        weight_matrix_st = self.calculate_weight_matrix()
+        numerator_matrix = np.multiply(numerator_matrix, weight_matrix_st)
+        denominator_matrix_st = np.multiply(denominator_matrix, weight_matrix_st)
+        numerator = torch.mul(torch.from_numpy(dist_matrix_st), torch.from_numpy(numerator_matrix)).sum().sum()
+        denominator_st = torch.mul(torch.from_numpy(dist_matrix_st), torch.from_numpy(denominator_matrix_st)).sum().sum()
+        # denominator_tt = torch.mul(torch.from_numpy(dist_matrix_tt), torch.from_numpy(weight_matrix_tt)).sum().sum()
+        # denominator_ss = torch.mul(torch.from_numpy(dist_matrix_ss), torch.from_numpy(weight_matrix_ss)).sum().sum()
+        # denominator = denominator_st + denominator_tt + denominator_ss
+        denominator = denominator_st
+        match_loss = numerator / denominator
+        self.match_loss = match_loss
+    
     def domain_distance(self, rep_1, rep_2):
+        if isinstance(rep_1, np.ndarray):
+            rep_1 = torch.from_numpy(rep_1).cuda()
+        if isinstance(rep_2, np.ndarray):
+            rep_2 = torch.from_numpy(rep_2).cuda()
         return F.pairwise_distance(rep_1, rep_2, p=2)  # 2-order distance
-
-    def update_tgt_representation(self, tgt_rep_0, tgt_rep_1):
-        self.tgt_rep_0 = tgt_rep_0.reshape((1, -1))
-        self.tgt_rep_1 = tgt_rep_1.reshape((1, -1))
-
-        # print("self.tgt_rep_0:",self.tgt_rep_0.shape)
-
-        # DA loss 分子
-        numerator = self.domain_distance(self.src_rep_0, self.tgt_rep_0) + self.domain_distance(self.src_rep_1,
-                                                                                                self.tgt_rep_1)
-        # DA loss 分母
-        denominator = self.domain_distance(self.src_rep_0, self.src_rep_1) + self.domain_distance(self.src_rep_0,
-                                                                                                  self.tgt_rep_1) + self.domain_distance(
-            self.tgt_rep_0, self.src_rep_1) + self.domain_distance(self.tgt_rep_0, self.tgt_rep_1)
-
-        da_loss = torch.div(numerator, denominator)
-        # print("da_loss:", da_loss)
-        self.da_loss = da_loss
 
     def forward(self, prob, labels):
         cls_loss = self.cls(prob, labels)
-        return cls_loss + self.lamda * self.da_loss
-
-
-def generate_representation(model, data_loader):
-    loader = DataLoader(data_loader, batch_size=1, shuffle=False, collate_fn=collate_fn)
-    label_list = []
-    rep_list = []
-    model.eval()
-    with torch.no_grad():
-        with tqdm(enumerate(loader), desc="loading representation...") as loop:
-            for i, batch in loop:
-                inputs, labels, lengths = batch
-                rep, _ = model(inputs, lengths)
-                rep_list.append(rep)
-                label_list.append(labels.cpu().numpy())
-
-    labels = np.array(label_list)
-    indices_0 = np.where(labels == 0)[0]
-    indices_1 = np.where(labels == 1)[0]
-    reps = torch.stack(rep_list, axis=0).squeeze()
-    return reps[indices_0].mean(axis=0), reps[indices_1].mean(axis=0)
-
-
-def load_source_domain_representation(source_rep_name):
-    '''
-    return src_rep_0, src_rep_1 shape:(hidden_size, )
-    '''
-    with open(source_rep_name + "_rep.pkl", "rb") as fp:
-        data = pickle.load(fp)
-        labels = np.array(data["label"])
-        reps = data["rep"]
-    indices_0 = np.where(labels == 0)[0]
-    indices_1 = np.where(labels == 1)[0]
-    return reps[indices_0].mean(axis=0), reps[indices_1].mean(axis=0)
+        # print('cls:', cls_loss)
+        # print('match', self.gamma * self.match_loss)
+        # return cls_loss + self.gamma * self.match_loss + self.da_gamma * self.da_loss
+        return cls_loss + self.gamma * self.match_loss
 
 
 def collate_fn(batch):
@@ -130,7 +230,6 @@ def eval(model, eval_loader, optimizer, epoch, loss_func=nn.CrossEntropyLoss, de
     validation_epoch_size = 0
     validation_loss = 0
     match_loss = 0
-    # da_loss = 0
     label_list = []
     prob_list = []
     logit_list = []
@@ -153,15 +252,13 @@ def eval(model, eval_loader, optimizer, epoch, loss_func=nn.CrossEntropyLoss, de
                 batch_accuracy = (logits == labels).float().sum().item()
                 validation_accuracy += batch_accuracy
                 validation_epoch_size += 1
-                validation_loss += loss.item()
-                match_loss += (loss_func.lamda * loss_func.da_loss).item()
-
+                validation_loss += loss.item() 
+                match_loss += (loss_func.gamma * loss_func.match_loss).item() 
                 loop.set_postfix(epoch=epoch, loss=validation_loss / validation_epoch_size,
                                  acc=validation_accuracy / validation_epoch_size)
 
     writer.add_scalar('loss/val_loss', np.mean(validation_loss), epoch)
     writer.add_scalar('loss/match_loss', np.mean(match_loss), epoch)
-    # writer.add_scalar('loss/da_loss', np.mean(da_loss), epoch)
 
     global best_spauc
     global latest_update_epoch
@@ -176,6 +273,7 @@ def eval(model, eval_loader, optimizer, epoch, loss_func=nn.CrossEntropyLoss, de
         print(f'Epoch {epoch}, Validation AUC: {auc}, Validation SPAUC: {spauc}')
         print(classification_report(label_list, logit_list, target_names=['0', '1']))
     '''
+
     model_name = model_name.replace('.pt', '_slt_by_spauc.pt')
     if spauc > best_spauc:
         best_spauc = spauc
@@ -195,7 +293,7 @@ def eval(model, eval_loader, optimizer, epoch, loss_func=nn.CrossEntropyLoss, de
                  "latest_update_epoch": latest_update_epoch}
         torch.save(state, model_name)
         print("Updating epoch... auc is {}, best spauc is:{}".format(checkpoint["auc"], checkpoint["best_spauc"]))
-
+    
     return np.mean(validation_loss)
 
 
@@ -237,7 +335,6 @@ def eval_wo_update(model, loader, desc='Validation'):
     plt.ylabel('Precision')
     plt.show()
     print(f'min Threshold: {thresholds[0]}, max Threshold: {thresholds[-1]}')
-    from sklearn.metrics import average_precision_score, f1_score
     auprc = average_precision_score(label_list, prob_list)
     # F1_score = f1_score(label_list, prob_list, average='micro')
     print(f'AUC: {auc}, SPAUC: {spauc}, AUPRC: {auprc}')
@@ -248,7 +345,76 @@ def eval_wo_update(model, loader, desc='Validation'):
             tmp.append(recall[_])
     if len(tmp):
         print('r@p at 0.9', sorted(list(tmp))[-1])
-    # print(precision[-20:])
+
+
+def generate_cluster_label(datasets, datafile):
+    num_of_card_type = []
+    df = pd.read_csv(datafile)
+    all_list = []
+    for _ in list(df.columns):
+        if re.match('card_type', _):
+            all_list.append(_)
+    df_group = df.groupby(['target_event_id'], sort=False)
+    for target_event_id, frame in df_group:
+        if frame['rn'].iloc[0] != 1:
+            continue
+        ctimes = 0
+        for _ in all_list:
+            ctimes +=  frame[_].iloc[-1]
+        num_of_card_type.append(ctimes)
+    return num_of_card_type
+
+
+def load_source_domain_representation(src_label_list, src_model_name):
+    """
+    return src_rep
+    """
+    with open(src_model_name.replace(".pt", "_rep.pkl"), "rb") as fp:
+        data = pickle.load(fp)
+        labels = np.array(data["label"])
+        reps = data["rep"]
+    hour_indicator = np.array(src_label_list)
+
+    hour_list = np.unique(hour_indicator)
+    hour_rep_list = []
+    for lab in hour_list:
+        array1 = np.where(hour_indicator == lab)[0] 
+        array2 = np.where(labels == 0)[0]
+        indices1 = np.intersect1d(array1, array2)
+        indices2 = np.setdiff1d(array1, array2)
+        hour_rep_list.append([reps[indices1], reps[indices2]])
+
+    return hour_list, hour_rep_list
+
+
+def generate_representation(model, dataset, input_label_list):
+    loader = DataLoader(dataset, batch_size=32, shuffle=False, collate_fn=collate_fn)
+    label_list = []
+    rep_list = []
+    model.eval()
+    with torch.no_grad():
+        with tqdm(enumerate(loader), desc="loading representation...") as loop:
+            for i, batch in loop:
+                inputs, labels, lengths = batch
+                rep, _ = model(inputs, lengths)
+                for _ in rep:
+                    rep_list.append(_)
+                for _ in labels:
+                    label_list.append(_.cpu().numpy())
+
+    reps = torch.stack(rep_list, axis=0).squeeze()
+    labels = np.array(label_list)
+    hour_indicator = np.array(input_label_list)
+
+    hour_list = np.unique(hour_indicator)
+    hour_rep_list = []
+    for lab in hour_list:
+        array1 = np.where(hour_indicator == lab)[0] 
+        array2 = np.where(labels == 0)[0]
+        indices1 = np.intersect1d(array1, array2)
+        indices2 = np.setdiff1d(array1, array2)
+        hour_rep_list.append([reps[indices1], reps[indices2]])
+    return hour_list, hour_rep_list
 
 
 input_size = None
@@ -258,7 +424,6 @@ batch_size = 32
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 best_spauc = 0
 latest_update_epoch = 0
-num_of_compression = 500
 
 
 if __name__ == '__main__':
@@ -272,9 +437,8 @@ if __name__ == '__main__':
     parser.add_argument('--tgt_datasets', default='HK')
     parser.add_argument('--maxepoch', default=2000, type=int)  # 200 for LZD
     parser.add_argument('--loss', default='cross_entropy')
-    parser.add_argument('--gamma', default=0.5, type=float)
-    parser.add_argument('--mark', default="da_transfer_HEN2", type=str)
-
+    parser.add_argument('--mark', default="KISA_PM_type2", type=str)
+    parser.add_argument('--gamma', default=0.01, type=float)  # 0.01
     args = parser.parse_args()
 
     src_trainpath = os.path.join(args.src_root, args.filepath)
@@ -352,6 +516,8 @@ if __name__ == '__main__':
     start = 0
     patience = 50
     early_stopping = EarlyStopping(patience, verbose=False, model_name=tgt_model_name)
+    len_of_src = 0
+    len_of_tgt = 0
 
     
     '''if os.path.exists(src_model_name):
@@ -365,32 +531,45 @@ if __name__ == '__main__':
     else:
         raise FileNotFoundError("initial source model not found.")'''
     
+
     if os.path.exists(tgt_model_name):
         checkpoint = torch.load(tgt_model_name)
         model.load_state_dict(checkpoint['model'])
         optimizer.load_state_dict(checkpoint['optimizer'])
         start = checkpoint['epoch'] + 1
-        best_spauc = checkpoint["best_spauc"]
+        # auc = checkpoint["auc"]
+        # spauc = checkpoint["best_spauc"]
         latest_update_epoch = checkpoint["latest_update_epoch"]
         print('exist {}! restart from {}'.format(tgt_model_name, start))
 
-    source_name = "LZD_2020-03_finetune"
-    src_rep_0, src_rep_1 = load_source_domain_representation(source_name)
-    loss_func = DomainAdaptionLoss(src_rep_0, src_rep_1, lamda=args.gamma)
-    tgt_rep_0, tgt_rep_1 = generate_representation(model, train_dataset)
-    loss_func.update_tgt_representation(tgt_rep_0, tgt_rep_1)
+    src_label_list = generate_cluster_label(args.src_datasets, src_trainpath)
+    len_of_src = len(src_label_list)
+    print('len_of_src', len_of_src)
+    src_hour_list, src_hour_rep_list = load_source_domain_representation(src_label_list, src_model_name)
+    tgt_label_list = generate_cluster_label(args.tgt_datasets, tgt_trainpath)
+    len_of_tgt = len(tgt_label_list)
+    print('len_of_tgt', len_of_tgt)
+    tgt_hour_list, tgt_hour_rep_list = generate_representation(model, train_dataset, tgt_label_list)
+    loss_func = TransferMeanLoss(gamma=float(args.gamma))
+    loss_func.update_src_representation(src_hour_list, src_hour_rep_list)
+    loss_func.update_tgt_representation(tgt_hour_list, tgt_hour_rep_list)
 
     if args.mode == 'train':
         for epoch in range(start, int(args.maxepoch)):
+            loss_func.match_representation()
             train(model, train_loader, optimizer, epoch, loss_func=loss_func)
-            tgt_rep_0, tgt_rep_1 = generate_representation(model, train_dataset)
-            loss_func.update_tgt_representation(tgt_rep_0, tgt_rep_1)
             val_loss = eval(model, eval_loader, optimizer, epoch, loss_func=loss_func, model_name=tgt_model_name)
 
-            early_stopping(val_loss, model, optimizer)
-            if early_stopping.early_stop:
-                print("Early stopping")
-                break
+            src_hour_list, src_hour_rep_list = generate_representation(model, src_dataset, src_label_list)
+            loss_func.update_src_representation(src_hour_list, src_hour_rep_list)
+            tgt_hour_list, tgt_hour_rep_list = generate_representation(model, train_dataset, tgt_label_list)
+            loss_func.update_tgt_representation(tgt_hour_list, tgt_hour_rep_list)
+
+            if epoch > 10:
+                early_stopping(val_loss, model, optimizer)
+                if early_stopping.early_stop:
+                    print("Early stopping")
+                    break
 
         checkpoint = torch.load(tgt_model_name)
         model.load_state_dict(checkpoint["model"])
@@ -402,9 +581,9 @@ if __name__ == '__main__':
 
     elif args.mode == 'validate':
         model.load_state_dict(checkpoint["model"])
-        print(f'latest update epoch: {latest_update_epoch}')
         print("evaluating val set...")
         eval_wo_update(model, eval_loader)
         print("evaluating test set...")
         eval_wo_update(model, test_loader)
+
 

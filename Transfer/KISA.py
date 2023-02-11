@@ -114,7 +114,7 @@ def eval(model, eval_loader, epoch, loss_func=nn.CrossEntropyLoss(), desc='Valid
     # print("label_list:",type(label_list[-1][0]),label_list[-1])
     # print("prob_list:",type(prob_list[-1][0]),prob_list[-1])
     auc = roc_auc_score(label_list, prob_list)
-    spauc = roc_auc_score(label_list, prob_list, max_fpr=0.05)
+    spauc = roc_auc_score(label_list, prob_list, max_fpr=0.1)
     print(f'Epoch {epoch}, Validation AUC: {auc}, Validation SPAUC: {spauc}')
     '''
     more details:
@@ -156,15 +156,14 @@ def eval_wo_update(model, loader, desc='Validation', save_rep=False):
     label_list = np.array(label_list).squeeze()
     prob_list = np.array(prob_list).squeeze()
     auc = roc_auc_score(label_list, prob_list)
-    spauc = roc_auc_score(label_list, prob_list, max_fpr=0.05)
+    spauc = roc_auc_score(label_list, prob_list, max_fpr=0.1)
     precision, recall, thresholds = precision_recall_curve(label_list, prob_list)
-    sns.set()
-    plt.plot(recall, precision)
-    plt.xlabel('Recall')
-    plt.ylabel('Precision')
-    plt.show()
+    
     print(f'min Threshold: {thresholds[0]}, max Threshold: {thresholds[-1]}')
-    print(f'AUC: {auc}, SPAUC: {spauc}')
+    from sklearn.metrics import average_precision_score, f1_score
+    auprc = average_precision_score(label_list, prob_list)
+    # F1_score = f1_score(label_list, prob_list, average='micro')
+    print(f'AUC: {auc}, SPAUC: {spauc}, AUPRC: {auprc}')
     print(classification_report(label_list, logit_list, target_names=['0', '1']))
 
 
@@ -176,7 +175,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--mode', default='train')  # validate
-    parser.add_argument('--dataset', default='HK_2020-01')
+    parser.add_argument('--dataset', default='HK_2020-03')
     parser.add_argument('--lr', default=0.01, type=float)  # 0.001 
     parser.add_argument('--maxepoch', default=10000, type=int)  # 200 for LZD
     parser.add_argument('--loss', default='cross_entropy')

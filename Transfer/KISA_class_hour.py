@@ -1,10 +1,15 @@
+"""
+automatically divide feature space into some subspaces by occur time within 24h
+use MMD to calculate the distance between subspaces
+find the matching relationship using the top k tactic
+"""
+
 import torch
 import torch.nn as nn
 from torch.nn.utils.rnn import pad_sequence
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter, writer
-import torch.nn.functional as F
 from sklearn.metrics import roc_auc_score, precision_recall_curve, classification_report
 import pandas as pd
 import numpy as np
@@ -17,11 +22,9 @@ import matplotlib.pyplot as plt
 from sklearn.cluster import KMeans
 import math
 from Earlystopping import EarlyStopping
-from Loss import MMD_Loss
+from Loss import coral_loss
 from Dataset import EncodedDataset
 from Model import LSTMClassifier
-import re
-import random
 
 
 class TransferMeanLoss(nn.Module):
@@ -45,34 +48,6 @@ class TransferMeanLoss(nn.Module):
         # self.tgt_rep_0 = tgt_rep_0
         # self.tgt_rep_1 = tgt_rep_1
 
-    def select_representation(self, num, rep):
-        count = 0
-        src_hour_rep = rep
-        while True:
-            indices = random.sample(range(src_hour_rep.shape[0]), num)
-            slt_src_hour_rep = src_hour_rep[indices]
-            selected_centroid = slt_src_hour_rep.mean(axis=0)
-            ori_centroid = src_hour_rep.mean(axis=0)
-            dist = F.pairwise_distance(ori_centroid.reshape(1, self.rep_hidden_states), 
-                                       selected_centroid.reshape(1, self.rep_hidden_states), p=2)
-            dist = float(dist)
-            # set select bar = 0.5
-            if dist < 0.5 or num < 30:
-                break
-            else:
-                count += 1
-                if count > 50:
-                    raise RuntimeError("Select Centroid Bar is too Strict.")
-        return slt_src_hour_rep
-    
-    def mmd_loss(self, rep1, rep2):
-        if rep1.shape[0] > rep2.shape[0]:
-            rep1 = self.select_representation(rep2.shape[0], rep1)
-        else:
-            rep2 = self.select_representation(rep1.shape[0], rep2)
-        loss = MMD_Loss(rep1.cpu().numpy(), rep2.cpu().numpy())
-        return loss
-
     def calc_representation_distance(self):
         dists = []
         for _ in range(self.tgt_num_space):
@@ -94,7 +69,15 @@ class TransferMeanLoss(nn.Module):
                     tgt_hour_rep_centroid1 = torch.from_numpy(self.tgt_hour_rep_list[_][1]).cuda()
                 else:
                     tgt_hour_rep_centroid1 = self.tgt_hour_rep_list[_][1]
-                dis = self.mmd_loss(src_hour_rep_centroid0, tgt_hour_rep_centroid0) + self.mmd_loss(src_hour_rep_centroid1, tgt_hour_rep_centroid1) 
+                if len(src_hour_rep_centroid0) > 500:
+                    src_hour_rep_centroid0 = self.select_representation(500, src_hour_rep_centroid0)
+                if len(src_hour_rep_centroid1) > 500:
+                    src_hour_rep_centroid1 = self.select_representation(500, src_hour_rep_centroid1)
+                if len(tgt_hour_rep_centroid0) > 500:
+                    tgt_hour_rep_centroid0 = self.select_representation(500, tgt_hour_rep_centroid0)
+                if len(tgt_hour_rep_centroid1) > 500:
+                    tgt_hour_rep_centroid1 = self.select_representation(500, tgt_hour_rep_centroid1)
+                dis = coral_loss(src_hour_rep_centroid0, tgt_hour_rep_centroid0) + coral_loss(src_hour_rep_centroid1, tgt_hour_rep_centroid1) 
                 dist.append(float(dis))
             dists.append(dist)
         distance_st = np.array(dists)  # (self.tgt_num_space, self.src_num_spaces)
@@ -166,7 +149,7 @@ class TransferMeanLoss(nn.Module):
         # denominator_ss = torch.mul(torch.from_numpy(dist_matrix_ss), torch.from_numpy(weight_matrix_ss)).sum().sum()
         # denominator = denominator_st + denominator_tt + denominator_ss
         denominator = denominator_st
-        match_loss = numerator / denominator
+        match_loss = 3 * numerator / denominator
         self.match_loss = match_loss
     
     def domain_distance(self, rep_1, rep_2):
@@ -258,7 +241,7 @@ def eval(model, eval_loader, optimizer, epoch, loss_func=nn.CrossEntropyLoss, de
     # print("label_list:",type(label_list[-1][0]),label_list[-1])
     # print("prob_list:",type(prob_list[-1][0]),prob_list[-1])
     auc = roc_auc_score(label_list, prob_list)
-    spauc = roc_auc_score(label_list, prob_list, max_fpr=0.01)
+    spauc = roc_auc_score(label_list, prob_list, max_fpr=0.1)
     print(f'Epoch {epoch}, Validation AUC: {auc}, Validation SPAUC: {spauc}')
     '''
     more details:
@@ -320,7 +303,7 @@ def eval_wo_update(model, loader, desc='Validation'):
                 loop.set_postfix(acc=validation_accuracy / validation_epoch_size)
 
     auc = roc_auc_score(label_list, prob_list)
-    spauc = roc_auc_score(label_list, prob_list, max_fpr=0.01)
+    spauc = roc_auc_score(label_list, prob_list, max_fpr=0.1)
     precision, recall, thresholds = precision_recall_curve(label_list, prob_list)
     sns.set()
     plt.plot(recall, precision)
@@ -333,21 +316,39 @@ def eval_wo_update(model, loader, desc='Validation'):
 
 
 def generate_cluster_label(datasets, datafile):
-    num_of_card_type = []
+    with open('./retrieve_time_running_record/{}_time.pkl'.format(datasets), "rb") as fp:
+        time = pickle.load(fp)
     df = pd.read_csv(datafile)
-    all_list = []
-    for _ in list(df.columns):
-        if re.match('card_type', _):
-            all_list.append(_)
+    ts = []
+    dataset = []
+    SSE = []
+    label_preds = []
     df_group = df.groupby(['target_event_id'], sort=False)
     for target_event_id, frame in df_group:
         if frame['rn'].iloc[0] != 1:
             continue
-        ctimes = 0
-        for _ in all_list:
-            ctimes +=  frame[_].iloc[-1]
-        num_of_card_type.append(ctimes)
-    return num_of_card_type
+        ts.append(pd.to_datetime(time[target_event_id]))
+    for _ in range(len(ts)):
+        ts[_] = (3600*ts[_].hour + 60*ts[_].minute + ts[_].second)*2*math.pi/3600/24
+        dataset.append([math.cos(ts[_]), math.sin(ts[_])])
+    for num_of_clusters in range(1, 25):
+        dataset = np.array(dataset)
+        estimator = KMeans(num_of_clusters)  # 构造聚类器
+        estimator.fit(dataset)  # 聚类
+        label_pred = estimator.labels_  # 获取聚类标签
+        centroids = estimator.cluster_centers_  # 获取聚类中心
+        inertia = estimator.inertia_
+        label_preds.append(label_pred)
+        SSE.append(inertia)
+    cmpSSE = []
+    for _ in range(22):
+        cmpSSE.append((SSE[_] - SSE[_ + 1]) / (SSE[_ + 1] - SSE[_ + 2]))
+    for _ in range(22):
+        if cmpSSE[_] < cmpSSE[_ + 1]:
+            num_of_clusters = _ + 2
+            break
+    print("num_of_clusters:", num_of_clusters)
+    return label_preds[num_of_clusters-1]
 
 
 def load_source_domain_representation(src_label_list, src_model_name):
@@ -414,16 +415,16 @@ latest_update_epoch = 0
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--mode', default='train')  # validate
-    parser.add_argument('--src_root', default='../Data/LZD/csv')
-    parser.add_argument('--tgt_root', default='../Data/HK/csv')
+    parser.add_argument('--src_root', default='../Data/LZD')
+    parser.add_argument('--tgt_root', default='../Data/HK')
     parser.add_argument('--filepath', default='train_2020-01.csv')
     parser.add_argument('--lr', default=0.0001, type=float)  # 0.001 for LZD
     parser.add_argument('--src_datasets', default='LZD')
     parser.add_argument('--tgt_datasets', default='HK')
     parser.add_argument('--maxepoch', default=2000, type=int)  # 200 for LZD
     parser.add_argument('--loss', default='cross_entropy')
-    parser.add_argument('--mark', default="KASA_type", type=str)
-    parser.add_argument('--gamma', default=0.01, type=float)  # 0.01
+    parser.add_argument('--mark', default="sub_by_hour", type=str)
+    parser.add_argument('--gamma', default=0.4, type=float)  # 0.4
     args = parser.parse_args()
 
     src_trainpath = os.path.join(args.src_root, args.filepath)
@@ -570,3 +571,5 @@ if __name__ == '__main__':
         eval_wo_update(model, eval_loader)
         print("evaluating test set...")
         eval_wo_update(model, test_loader)
+
+
