@@ -1,5 +1,5 @@
 # KISA(Knowledge-inspired Subdomain Adaptation for Cross-Domain Knowledge Transfer)
-# Fraud Detection Part
+# Fraud Detection Part (in the Transfer File)
 Datasets are unavailable for business consideration  
 
 To run the KISA:  
