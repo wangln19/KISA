@@ -2,7 +2,7 @@
 # Fraud Detection Part
 Datasets are unavailable for business consideration  
 
-To run the experiment:  
+To run the KISA:  
 
 1.python share_lstm.py --mode train --filepath XXX --direct True --mark XXX  
 
