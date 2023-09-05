@@ -354,7 +354,7 @@ if __name__ == '__main__':
     early_stopping = EarlyStopping(patience, verbose=False, model_name=tgt_model_name)
 
     
-    '''if os.path.exists(src_model_name):
+    if os.path.exists(src_model_name):
         src_checkpoint = torch.load(src_model_name)
         src_model = src_checkpoint['model']
         model_dict = model.state_dict()
@@ -363,7 +363,7 @@ if __name__ == '__main__':
         model.load_state_dict(model_dict)
         print('exist {}!'.format(src_model_name))
     else:
-        raise FileNotFoundError("initial source model not found.")'''
+        raise FileNotFoundError("initial source model not found.")
     
     if os.path.exists(tgt_model_name):
         checkpoint = torch.load(tgt_model_name)
@@ -374,7 +374,7 @@ if __name__ == '__main__':
         latest_update_epoch = checkpoint["latest_update_epoch"]
         print('exist {}! restart from {}'.format(tgt_model_name, start))
 
-    source_name = "LZD_2020-03_finetune"
+    source_name = "LZD_2020-07_finetune"
     src_rep_0, src_rep_1 = load_source_domain_representation(source_name)
     loss_func = DomainAdaptionLoss(src_rep_0, src_rep_1, lamda=args.gamma)
     tgt_rep_0, tgt_rep_1 = generate_representation(model, train_dataset)

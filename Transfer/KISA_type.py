@@ -530,7 +530,7 @@ if __name__ == '__main__':
     len_of_src = 0
     len_of_tgt = 0
 
-    '''
+    
     if os.path.exists(src_model_name):
         src_checkpoint = torch.load(src_model_name)
         src_model = src_checkpoint['model']
@@ -541,7 +541,7 @@ if __name__ == '__main__':
         print('exist {}!'.format(src_model_name))
     else:
         raise FileNotFoundError("initial source model not found.")
-    '''
+    
 
     if os.path.exists(tgt_model_name):
         checkpoint = torch.load(tgt_model_name)

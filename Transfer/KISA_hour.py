@@ -464,7 +464,7 @@ def eval_wo_update(model, loader, desc='Validation', save_rep=False):
         # print("rep_list",type(rep_list),rep_list.shape)
         # print("model_name",model_name)
          # print("label_list",len(label_list),label_list[0])
-        rep_name = tgt_model_name.replace(".pt", "_test_rep.pkl")
+        rep_name = tgt_model_name.replace(".pt", "_train_rep.pkl")
         with open(rep_name, "wb") as fp:
             pickle.dump({"label": label_list, "rep": rep_list}, fp)
 
@@ -589,7 +589,7 @@ if __name__ == '__main__':
     len_of_tgt = 0
 
     
-    '''if os.path.exists(src_model_name):
+    if os.path.exists(src_model_name):
         src_checkpoint = torch.load(src_model_name)
         src_model = src_checkpoint['model']
         model_dict = model.state_dict()
@@ -598,7 +598,7 @@ if __name__ == '__main__':
         model.load_state_dict(model_dict)
         print('exist {}!'.format(src_model_name))
     else:
-        raise FileNotFoundError("initial source model not found.")'''
+        raise FileNotFoundError("initial source model not found.")
     
 
     if os.path.exists(tgt_model_name):
@@ -669,7 +669,7 @@ if __name__ == '__main__':
     
     elif args.mode == 'generate':
         model.load_state_dict(checkpoint["model"])
-        gen_loader = DataLoader(test_dataset, batch_size=1, shuffle=False, collate_fn=collate_fn)
+        gen_loader = DataLoader(train_dataset, batch_size=1, shuffle=False, collate_fn=collate_fn)
         print("generating representation...")
         eval_wo_update(model, gen_loader, save_rep=True)
     

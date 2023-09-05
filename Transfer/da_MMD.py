@@ -234,7 +234,7 @@ def generate_representation(model, dataset, input_label_list):
 
 def Guassian_Kernel(source, target, kernel_mul=2.0, kernel_num=5, fix_sigma=None):
     '''
-    将源域数据和目标域数据转化为核矩阵，即上文中的K
+    将源域数据和目标域数据转化为核矩阵
     Params:
         source: 源域数据（n * len(x))
         target: 目标域数据（m * len(y))
@@ -481,7 +481,7 @@ if __name__ == '__main__':
     early_stopping = EarlyStopping(patience, verbose=False, model_name=tgt_model_name)
 
     
-    '''if os.path.exists(src_model_name):
+    if os.path.exists(src_model_name):
         src_checkpoint = torch.load(src_model_name)
         src_model = src_checkpoint['model']
         model_dict = model.state_dict()
@@ -490,7 +490,7 @@ if __name__ == '__main__':
         model.load_state_dict(model_dict)
         print('exist {}!'.format(src_model_name))
     else:
-        raise FileNotFoundError("initial source model not found.")'''
+        raise FileNotFoundError("initial source model not found.")
     
 
     if os.path.exists(tgt_model_name):

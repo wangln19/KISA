@@ -396,7 +396,7 @@ if __name__ == '__main__':
     early_stopping = EarlyStopping(patience, verbose=False, model_name=tgt_model_name)
 
     
-    '''if os.path.exists(src_model_name):
+    if os.path.exists(src_model_name):
         src_checkpoint = torch.load(src_model_name)
         src_model = src_checkpoint['model']
         model_dict = model.state_dict()
@@ -405,7 +405,7 @@ if __name__ == '__main__':
         model.load_state_dict(model_dict)
         print('exist {}!'.format(src_model_name))
     else:
-        raise FileNotFoundError("initial source model not found.")'''
+        raise FileNotFoundError("initial source model not found.")
     
 
     if os.path.exists(tgt_model_name):

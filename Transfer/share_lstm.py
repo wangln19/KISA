@@ -421,17 +421,18 @@ if __name__ == '__main__':
             best_spauc = checkpoint["best_spauc"]
             latest_update_epoch = checkpoint["latest_update_epoch"]
             print('exist{}! start from {}'.format(src_model_name, start))
-    elif not args.direct:
-        src_model_name = 'LZD_2020-03_finetune.pt'
-        if os.path.exists(src_model_name):
-            checkpoint = torch.load(src_model_name)
-            model.load_state_dict(checkpoint['model'])
-            best_spauc = 0
-            print('exist{}! start finetune from {}'.format(src_model_name, start))
-        else:
-            raise FileNotFoundError("initial extractor model not found.")
+    else:
+        if not args.direct:
+            src_model_name = 'LZD_2020-07_finetune.pt'
+            if os.path.exists(src_model_name):
+                checkpoint = torch.load(src_model_name)
+                model.load_state_dict(checkpoint['model'])
+                best_spauc = 0
+                print('exist{}! start finetune from {}'.format(src_model_name, start))
+            else:
+                raise FileNotFoundError("initial extractor model not found.")
         
-        # tgt_model_name = 'HK_2020-01_finetune_selected_by_val_loss.pt'
+        # tgt_model_name = 'HK_2020-07_finetune_selected_by_val_loss.pt'
         if os.path.exists(tgt_model_name):
             checkpoint = torch.load(tgt_model_name)
             model.load_state_dict(checkpoint['model'])

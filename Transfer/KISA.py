@@ -216,18 +216,8 @@ if __name__ == '__main__':
     start = 0
     patience = 20
     early_stopping = EarlyStopping(patience, verbose=False, model_name=model_name)
-    '''
-    if os.path.exists(src_model_name):
-        src_checkpoint = torch.load(src_model_name)
-        src_model = src_checkpoint['model']
-        model_dict = model.state_dict()
-        pretrained_dict = {k: v for k, v in src_model.items() if k in model_dict}
-        model_dict.update(pretrained_dict)
-        model.load_state_dict(model_dict)
-        print('exist {}!'.format(src_model_name))
-    else:
-        raise FileNotFoundError("initial source model not found.")
-    '''
+    
+
 
     if os.path.exists(model_name):
         checkpoint = torch.load(model_name)
